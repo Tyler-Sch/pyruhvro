@@ -6,6 +6,7 @@ start_time = time.time()
 #     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
 with open("../ruhvro/test_1mil.kafka", "r") as f:
     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
+    # data = [i for i in f.readlines()]
 
 schema = """{
   "type": "record",
@@ -68,6 +69,11 @@ schema = """{
 
 # deserialize_datum([data[0]], schema)
 
-result = deserialize_datum(data, schema)
+import pyarrow as pa
+arr = pa.array(data, pa.string())
+# result = deserialize_datum(data, schema)
+result = from_arrow(arr)
+print(result[0])
 end_time = time.time()
 print(end_time - start_time)
+

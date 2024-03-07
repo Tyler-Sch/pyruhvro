@@ -8,4 +8,5 @@ edition = "2021"
 [dependencies]
 rayon = "1.9.0"
 apache-avro = "0.16.0"
+arrow = { version = "50.0.0", features = [ "pyarrow" ]}
 anyhow = "1.0.80"

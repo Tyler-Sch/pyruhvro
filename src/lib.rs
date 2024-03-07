@@ -2,15 +2,36 @@ use std::collections::HashMap;
 
 use apache_avro::types;
 use apache_avro::types::Value as AvroValue;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyLong,PyDict, PyInt, PyList};
 use pyo3::PyObject;
 use ruhvro::deserialize;
-use std::time::{Duration, Instant};
+use arrow::pyarrow::PyArrowType;
+use arrow::array::{make_array, ArrayData, BinaryArray, StringArray};
 
 #[pyfunction]
 fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
     Ok((a + b).to_string())
+}
+
+#[pyfunction]
+fn from_arrow<'a>(array: PyArrowType<ArrayData>) -> PyResult<Vec<String>> {
+    let array = array.0;
+    let array = make_array(array);
+    let dcast = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| PyTypeError::new_err("Not a String array"))?;
+    let a = dcast.into_iter().map(|x| String::from(x.unwrap())).collect::<Vec<_>>();
+    Ok(a)
+
+}
+
+#[pyfunction]
+fn deserialize_datum_from_arrow(array: PyArrowType<ArrayData>) -> PyResult<()> {
+    let array = array.0;
+    let array = make_array(array);
+    let dcast = array.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| PyTypeError::new_err("Is bytearray?"))?;
+    unimplemented!()
+
 }
 
 #[pyfunction]
@@ -123,6 +144,8 @@ fn tess2(py: Python) -> PyResult<Vec<&PyDict>> {
         let pd = PyDict::new(py);
         pd.set_item("sure", 13);
         pd.set_item(2, "this thing is difficult");
+
+        
         outer.push(pd);
     }
     Ok(outer)
@@ -167,13 +190,7 @@ fn pyruhvro(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tess, m)?)?;
     m.add_function(wrap_pyfunction!(tess2, m)?)?;
     m.add_function(wrap_pyfunction!(mess_around, m)?)?;
+    m.add_function(wrap_pyfunction!(from_arrow, m)?)?;
     let _ = m.add_function(wrap_pyfunction!(deserialize_datum, m)?)?;
     Ok(())
-}
-
-#[test]
-fn convert_to_py() {
-    Python::with_gil(|py|{
-    let i = 2i32.into_py(py);
-    })
 }
