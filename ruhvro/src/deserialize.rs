@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use anyhow::{Result};
-use arrow::array::{ArrayRef, BinaryArray};
+use arrow::array::{Array, ArrayRef, BinaryArray};
 use apache_avro::{from_avro_datum};
 use apache_avro::types::Value;
 use apache_avro::Schema;
@@ -11,14 +11,6 @@ pub fn parse_schema(schema_string: &str) -> Result<Schema> {
     Ok(Schema::parse_str(schema_string)?)
 }
 
-// pub fn per_datum_deserialize(data: &Vec<Vec<u8>>, schema: &Schema) -> Vec<Result<Value>> {
-//     data.into_iter()
-//         .map(|datum| {
-//             let mut sliced = &datum[..];
-//             Ok(from_avro_datum(schema, &mut sliced, None)?)
-//         })
-//         .collect::<Vec<_>>()
-// }
 
 pub fn per_datum_deserialize(data: &Vec<Vec<u8>>, schema: &Schema) -> Box<Vec<Result<Value>>> {
     Box::new(data.into_iter()
@@ -28,14 +20,15 @@ pub fn per_datum_deserialize(data: &Vec<Vec<u8>>, schema: &Schema) -> Box<Vec<Re
         })
         .collect::<Vec<_>>())
 }
-// pub fn per_datum_deserialize(data: &Vec<&Vec<u8>>, schema: &Schema) -> Vec<Result<Value>> {
-//     data.par_iter()
-//         .map(|datum| {
-//             let mut sliced = &datum[..];
-//             Ok(from_avro_datum(schema, &mut sliced, None)?)
-//         })
-//         .collect::<Vec<_>>()
-// }
+
+pub fn per_datum_deserialize_multi(data: &Vec<&Vec<u8>>, schema: &Schema) -> Vec<Result<Value>> {
+    data.par_iter()
+        .map(|datum| {
+            let mut sliced = &datum[..];
+            Ok(from_avro_datum(schema, &mut sliced, None)?)
+        })
+        .collect::<Vec<_>>()
+}
 #[derive(Debug)]
 struct DeserialzeError;
 impl Error for DeserialzeError {
@@ -46,13 +39,23 @@ impl std::fmt::Display for DeserialzeError {
     }
 }
 
-pub fn per_datum_arrow_deserialize(data: ArrayRef, schema: &Schema) -> Vec<Result<Value>> {
-  let arr = data.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| DeserialzeError).unwrap();
-  arr.iter().map(|d| {
-    Ok(from_avro_datum(schema, &mut (d.unwrap()), None).unwrap())
-  }).collect::<Vec<_>>()
+pub fn per_datum_arrow_deserialize(data: ArrayRef, schema: &Schema) -> Vec<Vec<Result<Value>>> {
+    let arr = data.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| DeserialzeError).unwrap();
+    let mut slices = vec![];
+    let cores = 24usize;
+    let chunk_size = arr.len() / cores;
+    for i in (0..cores) {
+        let slice = arr.slice(i * chunk_size, chunk_size);
+        slices.push(slice)
+    }
+    let p = slices.par_iter().map(|x| {
+        x.iter().map(|inn| {
+            let mut a = inn.unwrap();
+            Ok(from_avro_datum(schema, &mut a, None).unwrap())
+        }).collect::<Vec<_>>()
+    }).collect::<Vec<_>>();
+    p
 }
-
 #[cfg(test)]
 mod tests {
 
@@ -125,7 +128,7 @@ mod tests {
           let parsed_schema = parse_schema(s).unwrap();
           let avro_datum = "4834346437643065662d613264662d343833652d393261312d313532333830366164656334380a4c696e64610857617265022c6c696e646173636f7474406578616d706c652e6e6574062628323636293734302d31323737783031313432283030312d3935392d3839342d36353030783739392a3030312d3339362d3831392d363830307830303139000006044d72100866696e640e10617070726f6163680c00c0f691c7c35f";
           let encoded = utils::decode_hex(avro_datum);
-          let newv = vec![&encoded[..]];
+          let newv = vec![&encoded[..], &encoded[..], &encoded[..], &encoded[..]];
           let arrow_array = Arc::new(array::BinaryArray::from_vec(newv)) as ArrayRef;
           let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
           println!("{:?}", decoded);

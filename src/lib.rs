@@ -26,11 +26,13 @@ fn from_arrow<'a>(array: PyArrowType<ArrayData>) -> PyResult<Vec<String>> {
 }
 
 #[pyfunction]
-fn deserialize_datum_from_arrow(array: PyArrowType<ArrayData>) -> PyResult<()> {
+fn deserialize_datum_from_arrow(array: PyArrowType<ArrayData>, schema: &str) -> PyResult<String> {
+    let parsed_schema = deserialize::parse_schema(schema).unwrap();
     let array = array.0;
     let array = make_array(array);
-    let dcast = array.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| PyTypeError::new_err("Is bytearray?"))?;
-    unimplemented!()
+    let r = deserialize::per_datum_arrow_deserialize(array.clone(), &parsed_schema);
+    Ok(format!("shape of output is {} rows, {} columns", r.len(), r[0].len()))
+
 
 }
 
@@ -191,6 +193,7 @@ fn pyruhvro(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tess2, m)?)?;
     m.add_function(wrap_pyfunction!(mess_around, m)?)?;
     m.add_function(wrap_pyfunction!(from_arrow, m)?)?;
+    m.add_function(wrap_pyfunction!(deserialize_datum_from_arrow, m)?)?;
     let _ = m.add_function(wrap_pyfunction!(deserialize_datum, m)?)?;
     Ok(())
 }
