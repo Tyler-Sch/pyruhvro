@@ -17,5 +17,5 @@ crate-type = ["cdylib"]
 pyo3 = "0.20.3"
 ruhvro = {path = "ruhvro"}
 apache-avro = {version = "0.16.0" }
-arrow = {version = "50.0.0", features = ["pyarrow", "ffi", "pyo3"]}
+arrow = {version = "50.0.0", features = ["pyarrow"]}
 
