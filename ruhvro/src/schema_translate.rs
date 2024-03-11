@@ -79,7 +79,7 @@ fn schema_to_field_with_props(
         AvroSchema::Union(us) => {
             // If there are only two variants and one of them is null, set the other type as the field data type
             let has_nullable = us
-                .find_schema_with_known_schemata::<apache_avro::Schema>(&Value::Null, None)
+                .find_schema_with_known_schemata::<apache_avro::Schema>(&Value::Null, None, &None)
                 .is_some();
             let sub_schemas = us.variants();
             if has_nullable && sub_schemas.len() == 2 {
@@ -315,84 +315,88 @@ fn test_avro_to_arrow() {
 #[test]
 fn test_avro_to_arrow_complex() {
     // Example Avro schema
-    //     let avro_schema_str = r#"
-    // {
-    //     "type": "record",
-    //     "name": "Person",
-    //     "fields": [
-    //         {
-    //             "name": "name",
-    //             "type": "string"
-    //         },
-    //         {
-    //             "name": "age",
-    //             "type": "int"
-    //         },
-    //         {
-    //             "type": "record",
-    //             "name": "Address",
-    //             "fields": [
-    //                 {
-    //                     "name": "street",
-    //                     "type": "string"
-    //                 },
-    //                 {
-    //                     "name": "city",
-    //                     "type": "string"
-    //                 },
-    //                 {
-    //                     "name": "country",
-    //                     "type": "string"
-    //                 }
-    //             ]
-    //         },
-    //         {
-    //             "name": "enumcol",
-    //             "type": "enum",
-    //             "symbols": ["a", "b", "c"]
-    //         },
-    //         {
-    //             "name": "mapcol",
-    //             "type": "map",
-    //             "values": "string",
-    //             "default": {}
-    //         },
-    //         {
-    //             "name": "unioncol",
-    //             "type": ["null", "string"]
-    //         }
-    //
-    //     ]
-    // }
-    //
-    //
-    //     "#;
+        let avro_schema_str = r#"
+    {
+        "type": "record",
+        "name": "Person",
+        "fields": [
+            {
+                "name": "name",
+                "type": "string"
+            },
+            {
+                "name": "age",
+                "type": "int"
+            },
+            {
+                "type": "record",
+                "name": "Address",
+                "fields": [
+                    {
+                        "name": "street",
+                        "type": "string"
+                    },
+                    {
+                        "name": "city",
+                        "type": "string"
+                    },
+                    {
+                        "name": "country",
+                        "type": "string"
+                    }
+                ]
+            },
+            {
+                "name": "enumcol",
+                "type": "enum",
+                "symbols": ["a", "b", "c"]
+            },
+            {
+                "name": "mapcol",
+                "type": "map",
+                "values": "string",
+                "default": {}
+            },
+            {
+                "name": "unioncol",
+                "type": ["null", "string"]
+            }
 
-    let avro_schema_str = r#"
-{
-    "type": "record",
-    "name": "Employee",
-    "fields": [
-        {
-            "name": "id",
-            "type": "int"
-        },
-        {
-            "name": "name",
-            "type": "string"
-        },
-        {
-            "name": "age",
-            "type": "int"
-        },
-        {
-            "name": "department",
-            "type": "string"
-        }
-    ]
-}
-    "#;
+        ]
+    }
+
+
+        "#;
+
+//     let avro_schema_str = r#"
+// {
+//     "type": "record",
+//     "name": "Employee",
+//     "fields": [
+//         {
+//             "name": "id",
+//             "type": "int"
+//         },
+//         {
+//             "name": "name",
+//             "type": "string"
+//         },
+//         {
+//             "name": "age",
+//             "type": "int"
+//         },
+//         {
+//             "name": "department",
+//             "type": "string"
+//         }
+//     ]
+// }
+//     "#;
     let arrow_schema = read_avro_schmea_from_string(&avro_schema_str).unwrap();
+    for f in
+    &arrow_schema.arrow_schema.fields {
+        println!("{:?}", f);
+    }
 
-    println!("{:#?}", arrow_schema.arrow_schema);
+    // println!("{:#?}", arrow_schema.arrow_schema);
 }

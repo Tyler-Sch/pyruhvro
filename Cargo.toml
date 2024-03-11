@@ -1,3 +1,7 @@
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
 [workspace]
 members = [
     "ruhvro",
