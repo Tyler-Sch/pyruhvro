@@ -4,12 +4,9 @@ use anyhow::Result;
 use apache_avro::from_avro_datum;
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
-use arrow::array::{
-    make_builder, Array, ArrayBuilder, ArrayRef, BinaryArray, Int32Builder, Int8Builder,
-    StringBuilder, StructBuilder,
-};
-use arrow::datatypes::Schema as ArrowSchema;
-use arrow::datatypes::{DataType, Fields};
+use arrow::array::{make_builder, Array, ArrayBuilder, ArrayRef, ArrowPrimitiveType, BinaryArray, Int32Builder, Int8Builder, ListBuilder, StringArray, StringBuilder, StructBuilder, BooleanBuilder, PrimitiveBuilder};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields, Int32Type};
+use enum_as_inner::EnumAsInner;
 use rayon::prelude::*;
 
 pub fn parse_schema(schema_string: &str) -> Result<AvroSchema> {
@@ -75,62 +72,242 @@ pub fn per_datum_arrow_deserialize(data: ArrayRef, schema: &AvroSchema) -> Vec<V
     p
 }
 
-// this seems to ahve been reimplementing Structbuilder
-// struct BuilderArrays<'a> {
-//     fields: &'a Fields,
-//     avro_schema: Option<&'a AvroSchema>,
-//     arrow_schema: Option<&'a ArrowSchema>,
-//     builders: Vec<Box<dyn ArrayBuilder>>,
-// }
-//
-// impl<'a> BuilderArrays<'a> {
-//     fn from_arrow_schema(arrow_schema: &'a ArrowSchema, capacity: usize) -> Self {
-//         let c = arrow_schema;
-//         let f = c.fields.iter();
-//         let mut builder_vec = vec![];
-//         for i in f {
-//             let b = make_builder(i.data_type(), capacity);
-//             builder_vec.push(b);
-//         }
-//         BuilderArrays {
-//             fields: &arrow_schema.fields,
-//             avro_schema: None,
-//             arrow_schema: Some(&arrow_schema),
-//             builders: builder_vec,
-//         }
+// maybe this needs to return result
+fn build_arrays(data: Vec<Value>, builder: &mut StructBuilder, fields: &Fields) -> () {
+    // first Value should be a  and first item in builder should be first data
+
+    let iters = data
+        .iter()
+        .zip(fields)
+        .enumerate()
+        .for_each(|(idx, (avro_val, field))| match avro_val {
+            Value::Int(i) => {
+                let ta = builder
+                    .field_builder::<Int32Builder>(idx)
+                    .unwrap_or_else(|| panic!("Error unwrapping target array"));
+                ta.append_value(*i);
+            }
+            Value::String(st) => {
+                let ta = builder
+                    .field_builder::<StringBuilder>(idx)
+                    .unwrap_or_else(|| panic!("Error unwrapping target array"));
+                ta.append_value(st);
+            }
+            Value::Record(d) => {
+                let mut ta = builder
+                    .field_builder::<StructBuilder>(idx)
+                    .unwrap_or_else(|| panic!("Error unwrapping target array"));
+                if let DataType::Struct(inner_fields) = field.data_type() {
+                    let inner_data = d.into_iter().cloned().map(|(x, y)| y).collect::<Vec<_>>();
+                    build_arrays(inner_data, &mut ta, inner_fields);
+                } else {
+                    panic!("couldnt find field struct")
+                }
+            }
+            Value::Array(v) => {
+                println!("idx: {}", idx);
+                match field.data_type() {
+                    DataType::List(inner) => match inner.data_type() {
+                        DataType::Int32 => {
+                            let ta = builder
+                                .field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(idx)
+                                .expect("should be a list builder");
+                            let ib = ta.values().as_any_mut().downcast_mut::<Int32Builder>().expect("should be an int builder");
+                            let vals = v
+                                .iter()
+                                .for_each(|x| {
+                                    let t: LocalVal = x.into();
+                                    println!("{:?}", t);
+                                    let r = t.into_int().unwrap();
+                                    ib.append_value(r);
+                                });
+                            ta.append(true);
+                            // ib.append_value(vals);
+                        },
+                        DataType::Utf8 => {
+                            println!("In Utf8 block");
+                            let ta = builder
+                            .field_builder::<ListBuilder<StringBuilder>>(idx)
+                            .unwrap();
+                            println!("got builder");
+                            let vals = v
+                            .iter()
+                            .map(|x| {
+                        let t: LocalVal = x.into();
+                        Some(t.into_str().unwrap())
+                        });
+                            ta.append_value(vals);
+                        }
+                        _ => unimplemented!(),
+                    },
+                    _ => panic!("Schema mismatch: Should be list type, but found other"),
+                }
+            }
+
+            _ => unimplemented!(),
+        });
+    builder.append(true);
+}
+
+
+fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &Fields) -> () {
+    data.iter()
+        .zip(fields)
+        .enumerate()
+        .for_each(|(idx, (avro_val, field))| {
+            match field.data_type() {
+                DataType::Boolean => {
+                    let target = builder.field_builder::<BooleanBuilder>(idx).expect("Did not find Bool builder");
+                    // can be bool or null
+                    if let &Value::Boolean(b) = avro_val {
+                        target.append_value(b);
+                    }
+                    else {
+                        target.append_null();
+                    }
+                }
+                DataType::Int32 => {
+                    let target = builder.field_builder::<Int32Builder>(idx).expect("Did not find Int builder");
+                    if let &Value::Int(i) = avro_val {
+                        target.append_value(i);
+                    } else {
+                        target.append_null();
+                    }
+                }
+                DataType::Int64 => {}
+                DataType::UInt8 => {}
+                DataType::UInt16 => {}
+                DataType::UInt32 => {}
+                DataType::UInt64 => {}
+                DataType::Float16 => {}
+                DataType::Float32 => {}
+                DataType::Float64 => {}
+                DataType::Timestamp(_, _) => {}
+                DataType::Date32 => {}
+                DataType::Date64 => {}
+                DataType::Time32(_) => {}
+                DataType::Time64(_) => {}
+                DataType::Binary => {}
+                DataType::Utf8 => {
+                    let target = builder.field_builder::<StringBuilder>(idx).expect("Did not find StringBuilder");
+                    if let Value::String(s) = avro_val {
+                        target.append_value(s);
+                    } else {
+                        target.append_null();
+                    }
+
+                }
+                DataType::List(_) => {}
+                DataType::Struct(fields) => {
+                    let mut ta = builder
+                        .field_builder::<StructBuilder>(idx)
+                        .expect("Did not find StructBuilder");
+                    if let Value::Record(items) = avro_val {
+                        let avro_items = items.into_iter().map(|(_, y)| y.clone()).collect::<Vec<_>>();
+                        build_arrays_fields(&avro_items, ta, fields);
+                        ta.append(true);
+                    } else {
+                        ta.append_null();
+                    }
+                }
+                DataType::Union(_, _) => {}
+                DataType::Dictionary(_, _) => {}
+                DataType::Map(_, _) => {}
+                _ => unimplemented!()
+            };
+        }
+            )
+}
+fn add_to_primitive_array<T: ArrowPrimitiveType<Native = B>, B>(data: Option<B>, builder: &mut PrimitiveBuilder<T>) -> Result<()> {
+    if let Some(d) = data {
+        builder.append_value(d);
+    } else {
+        builder.append_null();
+    }
+    Ok(())
+}
+
+
+#[derive(Debug, EnumAsInner)]
+enum LocalVal<'a> {
+    Int(i32),
+    Str(&'a str),
+    List(Box<Vec<LocalVal<'a>>>),
+    Null,
+    Boolean(bool),
+    Long(i64),
+    Float(f32),
+}
+
+
+
+// impl<T: ArrowPrimitiveType> Into<T> for LocalVal<'_> {
+//     fn into(self) -> T {
+//         todo!()
 //     }
 // }
 
 
-// maybe this needs to return result
-fn build_arrays(data: Vec<&Value>, builder: &mut StructBuilder, fields: &Fields) -> () {
-    // first Value should be a  and first item in builder should be first data
-    let iters = data.iter().zip(fields).enumerate().for_each(|(idx, (avro_val, field))| {
-
-        match avro_val {
-           Value::Int(i) => {
-               let ta = builder.field_builder::<Int32Builder>(idx).unwrap_or_else(|| panic!("Error unwrapping target array"));
-               ta.append_value(*i);
-           },
-            Value::String(st) => {
-                let ta = builder.field_builder::<StringBuilder>(idx).unwrap_or_else(|| panic!("Error unwrapping target array"));
-                ta.append_value(st);
-            },
-            Value::Record(d) => {
-                let mut ta = builder.field_builder::<StructBuilder>(idx).unwrap_or_else(|| panic!("Error unwrapping target array"));
-                if let DataType::Struct(inner_fields) = field.data_type() {
-                    let inner_data = d.into_iter().map(|(x,y)| y).collect::<Vec<_>>();
-                    build_arrays(inner_data, &mut ta, inner_fields);
-                    ta.append(true);
-                } else { panic!("couldnt find field struct")}
-            },
-            _ => unimplemented!()
-        }
-    });
-
-
-
+impl<'a> From<&'a Vec<Value>> for LocalVal<'a> {
+    fn from(value: &'a Vec<Value>) -> Self {
+        let a = value
+            .iter()
+            .map(|x| {
+                let a: LocalVal = x.into();
+                a
+            })
+            .collect::<Vec<_>>();
+        LocalVal::List(Box::new(a))
+    }
 }
+
+impl<'a> From<&'a Value> for LocalVal<'a> {
+    fn from(value: &'a Value) -> Self {
+        match value {
+            Value::Int(i) => LocalVal::Int(*i),
+            Value::String(s) => LocalVal::Str(s),
+            Value::Boolean(b) => LocalVal::Boolean(*b),
+            Value::Null => LocalVal::Null,
+            Value::Long(i) => LocalVal::Long(*i),
+            Value::Array(v) => {
+                let a = v
+                    .iter()
+                    .map(|x| {
+                        let b: LocalVal = x.into();
+                        b
+                    })
+                    .collect::<Vec<_>>();
+                LocalVal::List(Box::new(a))
+            }
+            _ => unimplemented!(),
+        }
+    }
+}
+#[test]
+fn test_from() {
+    let a = Value::Int(14);
+    let b: LocalVal = (&a).into();
+    let bb = b.as_int();
+    println!("{:?}", bb);
+    let c = Value::String("hello".to_string());
+    let d: LocalVal = (&c).into();
+    let dd = d.as_str();
+    println!("{:?}", dd);
+    let e = Value::Array(vec![Value::Int(1), Value::Int(2)]);
+    let f: LocalVal = (&e).into();
+    let ff = f.as_list();
+    println!("{:?}", ff);
+    let g = vec![Value::Int(1), Value::Int(3)];
+    let gg: LocalVal = (&g).into();
+    println!("{:?}", gg);
+}
+
+fn try_conversion(v: &mut Box<dyn ArrayBuilder>) {
+    let a = v.as_any_mut().downcast_mut::<Int32Builder>().unwrap();
+    println!("success!");
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -139,7 +316,7 @@ mod tests {
 
     use apache_avro::to_value;
     use arrow::array;
-    use arrow::array::{Int32Array, Int32Builder, StringArray, StructArray};
+    use arrow::array::{downcast_primitive, GenericListBuilder, Int32Array, Int32Builder, LargeListBuilder, ListBuilder, StringArray, StructArray};
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{Field, Fields};
     use arrow::ipc::Int;
@@ -148,67 +325,103 @@ mod tests {
     use crate::utils;
 
     #[test]
-    fn test_build_arrays() {
-        let avro_data = vec![Value::Int(2), Value::String("abc".into()), Value::Record(vec![
-            ("inner_int".into(), Value::Int(1)),
-            ("inner_str".into(), Value::String("cba".into())),
-        ])];
-        let avro_iter = avro_data.iter().collect::<Vec<_>>();
-        let inner_int_fields = Field::new("inner_int", DataType::Int32, false);
-        let inner_string_field = Field::new("inner_string", DataType::Utf8, false);
-        let field_struct = Field::new("struct_f", DataType::Struct(Fields::from(vec![inner_int_fields, inner_string_field])), false);
-        let field1 = Field::new("int_arr", DataType::Int32, false);
-        let field2 = Field::new("str_arr", DataType::Utf8, false);
-        let fields = Fields::from(vec![field1, field2, field_struct]);
-        let mut sb = StructBuilder::from_fields(fields.clone(), 1);
-        build_arrays(avro_iter, &mut sb, &fields);
-        sb.append(true);
-        let r = sb.finish();
-        println!("{:?}", r);
-    }
-    #[test]
     fn test_struct_builder() {
         let sample_avro = vec![Value::Record(vec![
             ("intcol".into(), Value::Int(3)),
             ("stringcol".into(), Value::String("abc".into())),
-            ("nested".into(), Value::Record(vec![
-                ("nested_string".into(), Value::String("nested_string".into())),
-                ("nested_int".into(), Value::Int(123))
+            (
+                "nested".into(),
+                Value::Record(vec![
+                    (
+                        "nested_string".into(),
+                        Value::String("nested_string".into()),
+                    ),
+                    ("nested_int".into(), Value::Int(123)),
+                ]),
+            ),
+            ("arrcol".into(), Value::Array(vec![
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(2),
             ]))
         ])];
         let inner = vec![
             Field::new("nested_string", DataType::Utf8, false),
             Field::new("nested_int", DataType::Int32, false),
         ];
+        let inside_arrary_field = Arc::new(Field::new("item", DataType::Int32, true));
         let not_inner = vec![
             Field::new("intcol", DataType::Int32, false),
             Field::new("stringcol", DataType::Utf8, false),
             Field::new("nested", DataType::Struct(Fields::from(inner)), false),
+            Field::new("in_arr", DataType::List(inside_arrary_field), false)
         ];
         let field_outer = Field::new("outer", DataType::Struct(Fields::from(not_inner)), false);
         let fields = Fields::from(vec![field_outer]);
 
-        println!("{:?}", fields);
-        let mut b = StructBuilder::from_fields(fields.clone(), 5);
+        for i in fields.to_vec() {
+            match i.data_type() {
+                DataType::Struct(fs) => {
+                    fs.iter().for_each(|x| println!("{:?}", x));
+                }
+                _ => println!("ok")
+            };
+        };
 
-        println!("{:?}", b);
+        let mut b = StructBuilder::from_fields(fields.clone(), 5);
+        let z = b.field_builder::<StructBuilder>(0).unwrap();
+        // let c: &dyn ArrayBuilder = z.field_builder::<Box<dyn ArrayBuilder>>(0).unwrap();
+        // try_conversion(c);
+        // let a= b.field_builder::<Box<dyn ArrayBuilder>>(0).unwrap();
+        // println!("{:?}", b);
+        // let x = b.field_builder::<ListBuilder<StringBuilder>>(3);
+        // let inner = b.field_builder::<StructBuilder>(0).unwrap();
+        // let ta = inner.field_builder::<ListBuilder<Int32Builder>>(3);
+        // println!("{:?}", ta);
+        // println!("{:?}", x);
+        // let mut lb:Box<dyn ArrayBuilder> = Box::new(ListBuilder::new(Int8Builder::new()));
+        // let down_cast = lb.as_any_mut().downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>().unwrap();
+        // println!("{}", down_cast);
+
+
+        // build_arrays(sample_avro, &mut b, &fields);
+        // let r = b.finish();
+        // println!("{:?}", r);
+
         // let iterss = sample_avro.iter().zip(fields.iter()).for_each(|(x,y)|{
         //
         //     println!("value: {:?}", x);
         //     println!("field: {:?}", y);
         // }
         // );
-        let outer_int_col = b.field_builder::<StructBuilder>(0).unwrap();
-        println!("outer_int_col: {:?}", outer_int_col);
         // let outer_string_col = b.field_builder::<StringBuilder>(1).unwrap();
         // let nested = b.field_builder::<StructBuilder>(2).unwrap();
         // let nest_str = nested.field_builder::<StringBuilder>(0).unwrap();
         // let nest_int = nested.field_builder::<Int32Builder>(1).unwrap();
         // let builders: Vec<Box<dyn ArrayBuilder>> = vec![Box::new(outer_int_col), Box::new(outer_string_col), Box::new(nested),
         //                                                 Box::new(nest_str), Box::new(nest_int)];
-
     }
+    #[test]
+    fn test_boxed_list_list_array_builder() {
+        // This test is same as `test_list_list_array_builder` but uses boxed builders.
+        let values_builder = make_builder(
+            &DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            10,
+        );
+        let mut builder = ListBuilder::new(values_builder);
 
+        //  [[[1, 2], [3, 4]], [[5, 6, 7], null, [8]], null, [[9, 10]]]
+        builder
+            .values()
+            .as_any_mut()
+            .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
+            .expect("should be an ListBuilder")
+            .values()
+            .as_any_mut()
+            .downcast_mut::<Int32Builder>()
+            .expect("should be an Int32Builder")
+            .append_value(1);
+    }
     #[test]
     fn test_per_datum_deserialize_arrow() {
         let s = r#"{
@@ -419,8 +632,7 @@ mod tests {
         let _ = data1.iter().for_each(|x| {
             b1.append_value(x.unwrap());
             // &sb.append(true);
-        }
-        );
+        });
         let b2 = sb.field_builder::<Int32Builder>(1).unwrap();
         let _ = data2.iter().for_each(|x| {
             b2.append_option(x);
@@ -430,12 +642,13 @@ mod tests {
             // };
         });
         // println!("{:?}", b1.len());
-        for i in 0..data1.len() {sb.append(true);}
+        for i in 0..data1.len() {
+            sb.append(true);
+        }
         println!("{:?}", &sb.len());
         // println!("{:?}", &b1.len());
-        let r= &sb.finish();
+        let r = &sb.finish();
         println!("{:?}", r);
-
     }
 
     #[test]

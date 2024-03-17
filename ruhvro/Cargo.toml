@@ -11,3 +11,4 @@ apache-avro = "0.16.0"
 arrow = { version = "50.0.0", features = [ "pyarrow" ]}
 anyhow = "1.0.80"
 itertools = "0.12.1"
+enum-as-inner = "0.6.0"
