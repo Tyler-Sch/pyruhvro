@@ -39,7 +39,7 @@ fn deserialize_datum_from_arrow(array: PyArrowType<ArrayData>, schema: &str) -> 
 #[pyfunction]
 fn deserialize_datum<'a>(py: Python<'a>, data: Vec<Vec<u8>>, writer_schema: &'a str) -> PyResult<&'a PyList> {
     let parsed_schema = deserialize::parse_schema(writer_schema).unwrap();
-    let decoded = deserialize::per_datum_deserialize(&data, &parsed_schema);
+    let decoded = deserialize::per_datum_deserialize_multi(&data, &parsed_schema);
     let r = decoded
         .into_iter()
         .map(|x| avro_to_pydict(&x.unwrap()).unwrap())

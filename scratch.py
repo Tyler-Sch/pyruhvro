@@ -1,4 +1,4 @@
-from pyruhvro import  deserialize_datum_from_arrow
+from pyruhvro import  deserialize_datum_from_arrow, deserialize_datum
 import time
 
 start_time = time.time()
@@ -67,7 +67,7 @@ schema = """{
 
 # data[0]
 
-# deserialize_datum([data[0]], schema)
+# print(deserialize_datum([data[0]], schema))
 ################################################################################
 # import fastavro
 # import json
@@ -75,11 +75,13 @@ schema = """{
 # schema = fastavro.parse_schema(json.loads(schema))
 # result = [fastavro.schemaless_reader(BytesIO(i), schema) for i in data]
 ################################################################################
-import pyarrow as pa
-arr = pa.array(data, pa.binary())
-result = deserialize_datum_from_arrow(arr, schema)
+# import pyarrow as pa
+# arr = pa.array(data, pa.binary())
+# result = deserialize_datum_from_arrow(arr, schema)
 # result = from_arrow(arr)
-print(result)
+################################################################################
+result = deserialize_datum(data, schema)
+# print(result)
 end_time = time.time()
 print(end_time - start_time)
 
