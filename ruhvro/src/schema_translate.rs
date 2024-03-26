@@ -68,19 +68,19 @@ fn schema_to_field_with_props(
         AvroSchema::String => DataType::Utf8,
         AvroSchema::Array(item_schema) => DataType::List(Arc::new(schema_to_field_with_props(
             item_schema,
-            None,
-            false,
+            Some("item"),
+            true,
             None,
         )?)),
         AvroSchema::Map(value_schema) => {
-            let value_field = schema_to_field_with_props(value_schema, Some("value"), false, None)?;
+            let value_field = schema_to_field_with_props(value_schema, Some("value"), true, None)?;
             let key_field = Field::new("key", DataType::Utf8, false);
             let map_field = Arc::new(Field::new(
                 name.unwrap_or("mapcol"),
                 DataType::Struct(Fields::from(vec![key_field, value_field])),
-                true,
+                false,
             ));
-            DataType::Map(map_field, true)
+            DataType::Map(map_field, false)
         }
         AvroSchema::Union(us) => {
             // If there are only two variants and one of them is null, set the other type as the field data type
@@ -141,8 +141,8 @@ fn schema_to_field_with_props(
         }
         AvroSchema::Fixed(FixedSchema { size, .. }) => DataType::FixedSizeBinary(*size as i32),
         AvroSchema::Decimal(DecimalSchema {
-            precision, scale, ..
-        }) => DataType::Decimal128(*precision as u8, *scale as i8),
+                                precision, scale, ..
+                            }) => DataType::Decimal128(*precision as u8, *scale as i8),
         AvroSchema::Uuid => DataType::FixedSizeBinary(16),
         AvroSchema::Date => DataType::Date32,
         AvroSchema::TimeMillis => DataType::Time32(TimeUnit::Millisecond),
@@ -243,34 +243,34 @@ fn external_props(schema: &AvroSchema) -> HashMap<String, String> {
     let mut props = HashMap::new();
     match &schema {
         AvroSchema::Record(RecordSchema {
-            doc: Some(ref doc), ..
-        })
+                               doc: Some(ref doc), ..
+                           })
         | AvroSchema::Enum(EnumSchema {
-            doc: Some(ref doc), ..
-        })
+                               doc: Some(ref doc), ..
+                           })
         | AvroSchema::Fixed(FixedSchema {
-            doc: Some(ref doc), ..
-        }) => {
+                                doc: Some(ref doc), ..
+                            }) => {
             props.insert("avro::doc".to_string(), doc.clone());
         }
         _ => {}
     }
     match &schema {
         AvroSchema::Record(RecordSchema {
-            name: Name { namespace, .. },
-            aliases: Some(aliases),
-            ..
-        })
+                               name: Name { namespace, .. },
+                               aliases: Some(aliases),
+                               ..
+                           })
         | AvroSchema::Enum(EnumSchema {
-            name: Name { namespace, .. },
-            aliases: Some(aliases),
-            ..
-        })
+                               name: Name { namespace, .. },
+                               aliases: Some(aliases),
+                               ..
+                           })
         | AvroSchema::Fixed(FixedSchema {
-            name: Name { namespace, .. },
-            aliases: Some(aliases),
-            ..
-        }) => {
+                                name: Name { namespace, .. },
+                                aliases: Some(aliases),
+                                ..
+                            }) => {
             let aliases: Vec<String> = aliases
                 .iter()
                 .map(|alias| aliased(alias, namespace.as_deref(), None))

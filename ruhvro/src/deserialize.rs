@@ -1,10 +1,19 @@
+use std::collections::HashMap;
 use std::error::Error;
+use std::hash::Hasher;
+use std::sync::Arc;
+use crate::schema_translate::to_arrow_schema;
 
 use anyhow::Result;
 use apache_avro::from_avro_datum;
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
-use arrow::array::{make_builder, Array, ArrayBuilder, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanBuilder, Int32Builder, Int8Builder, ListBuilder, PrimitiveBuilder, StringArray, StringBuilder, StructBuilder, MapBuilder, DictionaryArray, Int64Builder, TimestampSecondBuilder, TimestampMillisecondBuilder};
+use arrow::array::{
+    make_builder, Array, ArrayBuilder, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanBuilder,
+    DictionaryArray, Int32Builder, Int64Builder, Int8Builder, ListBuilder, MapBuilder,
+    PrimitiveBuilder, StringArray, StringBuilder, StructArray, StructBuilder,
+    TimestampMillisecondBuilder, TimestampSecondBuilder,
+};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Int32Type};
 use rayon::prelude::*;
 
@@ -23,10 +32,7 @@ pub fn per_datum_deserialize(data: &Vec<Vec<u8>>, schema: &AvroSchema) -> Box<Ve
     )
 }
 
-pub fn per_datum_deserialize_multi(
-    data: &Vec<Vec<u8>>,
-    schema: &AvroSchema,
-) -> Vec<Result<Value>> {
+pub fn per_datum_deserialize_multi(data: &Vec<Vec<u8>>, schema: &AvroSchema) -> Vec<Result<Value>> {
     data.par_iter()
         .map(|datum| {
             let mut sliced = &datum[..];
@@ -71,27 +77,37 @@ pub fn per_datum_arrow_deserialize(data: ArrayRef, schema: &AvroSchema) -> Vec<V
     p
 }
 
-pub fn per_datum_deserialize_arrow(data: &Vec<Vec<u8>>, schema: &AvroSchema, fields: &Fields) -> arrow::array::StructArray {
-        let mut builder = StructBuilder::from_fields(fields.clone(), data.len());
-        data.into_iter()
-            .for_each(|datum| {
-                let mut sliced = &datum[..];
-                 let avro = from_avro_datum(schema, &mut sliced, None).unwrap();
-                match avro {
-                    Value::Record(inner) =>  {
-                        let a = inner.into_iter().map(|(x, y)|y ).collect::<Vec<_>>();
-                        build_arrays_fields(&a, &mut builder, fields);
-                    }
-                    _ => unimplemented!()
-                }
-            });
+pub fn per_datum_deserialize_arrow(
+    data: ArrayRef,
+    schema: &AvroSchema,
+) -> StructArray {
+    let fields = to_arrow_schema(schema).unwrap();
+    let arr = data
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| DeserialzeError)
+        .unwrap();
+    // let mut slices = vec![];
+    let mut builder = StructBuilder::from_fields(fields.clone(), data.len());
+    arr.into_iter().for_each(|datum| {
+        let mut sliced = &datum.unwrap()[..];
+        let avro = from_avro_datum(schema, &mut sliced, None).unwrap();
+        match avro {
+            Value::Record(inner) => {
+                let a = inner.into_iter().map(|(x, y)| y).collect::<Vec<_>>();
+                build_arrays_fields(&a, &mut builder, fields);
+            }
+            _ => unimplemented!(),
+        }
+    });
     builder.finish()
 }
 
 fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &Fields) -> () {
     data.iter()
         .zip(fields)
-        .enumerate().inspect(|i| println!("{:?}", i))
+        .enumerate()
+        .inspect(|i| println!("{:?}", i))
         .for_each(|(idx, (avro_val, field))| {
             match field.data_type() {
                 DataType::Boolean => {
@@ -116,14 +132,15 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                     }
                 }
                 DataType::Int64 => {
-                    let target = builder.field_builder::<Int64Builder>(idx).expect("Did not find Int64 builder");
-                    if let &Value::Long(i)  = avro_val {
-                        target.append_value(i);
-                    } if let &Value::TimestampMillis(i) = avro_val {
+                    let target = builder
+                        .field_builder::<Int64Builder>(idx)
+                        .expect("Did not find Int64 builder");
+                    if let &Value::Long(i) = avro_val {
                         target.append_value(i);
                     }
-                        else
-                     {
+                    if let &Value::TimestampMillis(i) = avro_val {
+                        target.append_value(i);
+                    } else {
                         target.append_null();
                     }
                 }
@@ -135,12 +152,14 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                 DataType::Float32 => {}
                 DataType::Float64 => {}
                 DataType::Timestamp(a, b) => {
-                   let ta = builder.field_builder::<TimestampMillisecondBuilder>(idx).expect("expected TimestampMillisecondBuilder");
-                   if let &Value::TimestampMillis(i)  = avro_val {
-                       ta.append_value(i);
-                   } else {
-                       ta.append_null();
-                   }
+                    let ta = builder
+                        .field_builder::<TimestampMillisecondBuilder>(idx)
+                        .expect("expected TimestampMillisecondBuilder");
+                    if let &Value::TimestampMillis(i) = avro_val {
+                        ta.append_value(i);
+                    } else {
+                        ta.append_null();
+                    }
                 }
                 DataType::Date32 => {}
                 DataType::Date64 => {}
@@ -167,6 +186,7 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                             add_to_list(v, inner, l);
                         }
                         target.append(true);
+
                     } else {
                         target.append_null();
                     }
@@ -185,21 +205,30 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                         unimplemented!();
                     }
                 }
-                DataType::Union(a,b ) => {
+                DataType::Union(a, b) => {
                     unimplemented!();
                 }
                 DataType::Map(a, b) => {
-                    let ta = builder.field_builder::<MapBuilder<Box<dyn ArrayBuilder>,Box<dyn ArrayBuilder>>>(idx)
+                    let ta = builder
+                        .field_builder::<MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>>(
+                            idx,
+                        )
                         .expect("MapBuilder not found");
                     if let Value::Map(hm) = avro_val {
-                        hm.iter().for_each(|(k,v)| {
+                        hm.iter().for_each(|(k, v)| {
                             // println!("{:?}", a);
-                            add_to_list(&Value::String(k.clone()), ta.keys(), &Field::new("key", DataType::Utf8, false));
-                            add_to_list(v, ta.values(), &Field::new("value", DataType::Int32, false));
-
+                            add_to_list(
+                                &Value::String(k.clone()),
+                                ta.keys(),
+                                &Field::new("key", DataType::Utf8, false),
+                            );
+                            add_to_list(
+                                v,
+                                ta.values(),
+                                &Field::new("value", DataType::Int32, false),
+                            );
                         });
                         ta.append(true);
-
                     }
                 }
                 _ => unimplemented!(),
@@ -235,8 +264,11 @@ fn add_to_list(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &Field)
             }
         }
         DataType::Int64 => {
-            let target = builder.as_any_mut().downcast_mut::<Int64Builder>().expect("Did not find Int64 builder");
-            if let &Value::Long(i)  = data {
+            let target = builder
+                .as_any_mut()
+                .downcast_mut::<Int64Builder>()
+                .expect("Did not find Int64 builder");
+            if let &Value::Long(i) = data {
                 target.append_value(i);
             } else {
                 target.append_null();
@@ -276,20 +308,203 @@ fn add_to_list(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &Field)
     }
 }
 
+struct ArrayContainer {
+    fields: Fields,
+    dtypes: Vec<DataType>,
+    builders: Vec<Box<dyn ArrayBuilder>>,
+    child_builders: Vec<Option<Box<ArrayContainer>>>,
+}
+
+impl ArrayContainer {
+    fn from_fields(f: &Fields, capacity: usize) -> Self {
+        let mut children = Vec::with_capacity(f.len());
+        for x in 0..children.capacity() {
+            children.push(None);
+        }
+        let mut builders = Vec::with_capacity(f.len());
+        let dtypes = f
+            .clone()
+            .into_iter()
+            .map(|x| x.data_type().to_owned())
+            .collect::<Vec<_>>();
+        for (idx, d) in f.iter().map(|x| x.data_type()).enumerate() {
+            // if let DataType::Struct(fields) = d {
+            //     let child = Box::new(ArrayContainer::from_fields(fields, capacity));
+            //     builders.push(make_builder(&DataType::Struct(fields.clone()), capacity));
+            //     children[idx] = Some(child);
+            // } else {
+            //     builders.push(make_builder(&d, capacity));
+            // }
+            match d {
+                DataType::Struct(fields) => {
+                    let child = Box::new(ArrayContainer::from_fields(fields, capacity));
+                    builders.push(make_builder(&DataType::Struct(fields.clone()), capacity));
+                    children[idx] = Some(child);
+                }
+                // DataType::List(fref) => {
+                //     unimplemented!()
+                // }
+                _ => builders.push(make_builder(&d, capacity)),
+            }
+        }
+        ArrayContainer {
+            fields: f.clone(),
+            dtypes,
+            builders,
+            child_builders: children,
+        }
+    }
+
+    // fn from_field(field: &Field, capacity: usize) -> Self {
+    //     let dtype = field.data_type();
+    //     let fields = Fields::from(field);
+    //     match dtype {
+    //         DataType::Struct(fieds) => {
+    //
+    //         }
+    //     }
+    //     unimplemented!()
+    // }
+
+    // should change this from idx to dyn ArrayBuilder to not have to reimplement
+    fn add_avro_val(&mut self, val: &Value, idx: usize) {
+        let dtype = &self.dtypes[idx];
+        match dtype {
+            DataType::Int32 => {
+                let mut b = &mut self.builders[idx];
+                Self::add_to_array(val, &mut b, dtype);
+            }
+            DataType::Utf8 => {
+                let mut b = &mut self.builders[idx];
+                Self::add_to_array(val, &mut b, dtype);
+            }
+            DataType::Struct(fs) => {
+                let mut child = self.child_builders[idx]
+                    .as_mut()
+                    .expect("expected child builders in array");
+                let mut struct_builder = self.builders[idx]
+                    .as_any_mut()
+                    .downcast_mut::<StructBuilder>()
+                    .expect("expected StructBuilder");
+                if let Value::Record(record) = val {
+                    for (sub_index, (_, sub_value)) in record.iter().enumerate() {
+                        child.add_avro_val(sub_value, sub_index);
+                    }
+                    struct_builder.append(true);
+                } else {
+                    struct_builder.append_null();
+                }
+            }
+            _ => unimplemented!(),
+        }
+    }
+
+    fn add_to_array(val: &Value, builder: &mut Box<dyn ArrayBuilder>, dtype: &DataType) -> Result<()> {
+        match dtype {
+            DataType::Int32 => {
+                let mut b = builder
+                    .as_any_mut()
+                    .downcast_mut::<Int32Builder>()
+                    .expect("expected Int32Builder");
+                if let &Value::Int(i) = val {
+                    b.append_value(i);
+                } else {
+                    b.append_null();
+                }
+            }
+            DataType::Utf8 => {
+                let mut b = builder
+                    .as_any_mut()
+                    .downcast_mut::<StringBuilder>()
+                    .expect("expected String Array");
+                if let Value::String(s) = val {
+                    b.append_value(s);
+                } else {
+                    b.append_null()
+                }
+            }
+            DataType::List(field_ref) => {
+
+            }
+            _ => unimplemented!()
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> ArrayRef {
+        let mut end_vec = vec![];
+        for (idx, builder) in self.builders.iter_mut().enumerate() {
+            if let DataType::Struct(fs) = &self.dtypes[idx] {
+                let mut child = self.child_builders[idx]
+                    .as_mut()
+                    .expect("Expected StructArry in vector");
+                let finished_child = child.finish();
+                end_vec.push(finished_child);
+            } else {
+                let data = builder.finish();
+                end_vec.push(data);
+            }
+        }
+        let a = StructArray::new(self.fields.clone(), end_vec, None);
+        let p = Arc::new(a) as ArrayRef;
+        p
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use arrow::array::{
-        downcast_primitive, GenericListBuilder, Int32Array, Int32Builder, LargeListBuilder,
-        ListBuilder, StringArray, StructArray,
-    };
+    use arrow::array::{Int32Array, Int32Builder, ListBuilder, StringArray, StructArray};
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{Field, Fields};
 
     use super::*;
     use crate::utils;
 
+    #[test]
+    fn test_array_container() {
+        let f1 = Field::new("ints", DataType::Int32, false);
+        let f2 = Field::new("string", DataType::Utf8, true);
+        let nested_f3_int = Field::new("nested_int", DataType::Int32, true);
+        let nested_f3_str = Field::new("nested_str", DataType::Utf8, false);
+        let f3_fields = Fields::from(vec![nested_f3_int, nested_f3_str]);
+        let f3 = Field::new("structarr", DataType::Struct(f3_fields), true);
+        let fields = Fields::from(vec![f1, f2, f3]);
+        let mut ac = ArrayContainer::from_fields(&fields, 4);
+        let intval = Value::Int(13);
+        let strval = Value::String("strval".into());
+        let nest_int = Value::Int(42);
+        let nest_str = Value::String("nested".into());
+        let recval = Value::Record(vec![("nested_int".into(), nest_int), ("nested_str".into(), nest_str)]);
+        ac.add_avro_val(&intval, 0);
+        ac.add_avro_val(&strval, 1);
+        ac.add_avro_val(&recval, 2);
+        // let intval_2 = Value::Int(42);
+        // let strval_2 = Value::String("v2".into());
+        let r = ac.finish();
+        println!("{:?}", r);
+    }
+    #[test]
+    fn test_if_i_have_dyn_arrays_can_i_iterate() {
+        // let mut a1: Box<dyn ArrayBuilder> = Box::new(Int32Builder::with_capacity(10));
+        // let mut a2: Box<dyn ArrayBuilder> = Box::new(StringBuilder::with_capacity(10, 20));
+        // let mut v = [a1, a2];
+        // let z = v[0].as_any_mut().downcast_mut::<Box<dyn ArrayBuilder>>().unwrap();
+        // let a = z.as_any().downcast_ref::<Box<dyn ArrayBuilder>>().expect("expect dyn array");
+        // z.append_value(2);
+        // let f = v[1].as_any_mut().downcast_mut::<StringBuilder>().unwrap();
+        // f.append_value("testing");
+        // // &z.append_value(3);
+        // let r = v
+        //     .into_iter()
+        //     .map(|mut d| {
+        //         let p = d.finish();
+        //         p
+        //     })
+        //     .collect::<Vec<ArrayRef>>();
+        // println!("{:?}", r);
+    }
     #[test]
     fn test_struct_builder() {
         let sample_avro = vec![Value::Record(vec![
@@ -309,26 +524,34 @@ mod tests {
                 "arrcol".into(),
                 Value::Array(vec![Value::Int(2), Value::Int(2), Value::Int(2)]),
             ),
-            ("mapcol".into(), Value::Map(HashMap::from([("abc".to_string(), Value::String("bcd".to_string())),
-                ("cde".to_string(), Value::String("dzz".to_string()))
-            ])))
+            (
+                "mapcol".into(),
+                Value::Map(HashMap::from([
+                    ("abc".to_string(), Value::String("bcd".to_string())),
+                    ("cde".to_string(), Value::String("dzz".to_string())),
+                ])),
+            ),
         ])];
         let inner = vec![
             Field::new("nested_string", DataType::Utf8, true),
-            Field::new("nested_int", DataType::Int32,true),
+            Field::new("nested_int", DataType::Int32, true),
         ];
         let inside_arrary_field = Arc::new(Field::new("item", DataType::Int32, true));
         // let map_fields =
         let key_field = Field::new("key", DataType::Utf8, false);
-        let value_field =Field::new("value", DataType::Utf8, true);
-        let map_field = Arc::new(Field::new("mapcol", DataType::Struct(Fields::from(vec![key_field, value_field])),false));
+        let value_field = Field::new("value", DataType::Utf8, true);
+        let map_field = Arc::new(Field::new(
+            "mapcol",
+            DataType::Struct(Fields::from(vec![key_field, value_field])),
+            false,
+        ));
 
         let not_inner = vec![
             Field::new("intcol", DataType::Int32, false),
             Field::new("stringcol", DataType::Utf8, false),
             Field::new("nested", DataType::Struct(Fields::from(inner)), false),
             Field::new("in_arr", DataType::List(inside_arrary_field), false),
-            Field::new("mapcol", DataType::Map(map_field, false), false)
+            Field::new("mapcol", DataType::Map(map_field, false), false),
         ];
         let field_outer = Field::new("outer", DataType::Struct(Fields::from(not_inner)), false);
         let fields = Fields::from(vec![field_outer]);
@@ -348,42 +571,6 @@ mod tests {
         let a = build_arrays_fields(&sample_avro, &mut b, &fields);
         let r = b.finish();
         println!("{:?}", r);
-
-    }
-
-    #[test]
-    fn test_boxed_list_list_array_builder() {
-        // This test is same as `test_list_list_array_builder` but uses boxed builders.
-        let values_builder = make_builder(
-            &DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
-            10,
-        );
-        let mut builder = ListBuilder::new(values_builder);
-
-        //  [[[1, 2], [3, 4]], [[5, 6, 7], null, [8]], null, [[9, 10]]]
-        builder
-            .values()
-            .as_any_mut()
-            .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
-            .expect("should be an ListBuilder")
-            .values()
-            .as_any_mut()
-            .downcast_mut::<Int32Builder>()
-            .expect("should be an Int32Builder")
-            .append_value(1);
-    }
-
-    #[test]
-    fn test_dictbuilder() {
-        let fields = vec![
-            Field::new("f1", DataType::Utf8, false),
-            Field::new(
-                "f2",
-                DataType::Dictionary(Box::new(DataType::Utf8), Box::new(DataType::Utf8)),
-                false,
-            ),
-        ];
-
     }
 
     #[test]
@@ -450,14 +637,13 @@ mod tests {
         let newv = vec![&encoded[..], &encoded[..], &encoded[..], &encoded[..]];
         // let arrow_array = Arc::new(array::BinaryArray::from_vec(newv)) as ArrayRef;
         // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
-       ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         let fields = crate::schema_translate::to_arrow_schema(&parsed_schema).unwrap();
         println!("{:?}", fields);
-        let r = per_datum_deserialize_arrow(&vec![encoded.clone(),], &parsed_schema, &fields.fields);
-        println!("{:?}",r);
+        let r = per_datum_deserialize_arrow(&vec![encoded.clone()], &parsed_schema, &fields.fields);
+        println!("{:?}", r);
         // println!("{:?}", decoded);
     }
-
 
     #[test]
     fn test_per_datum_deserialize() {
@@ -563,7 +749,6 @@ mod tests {
         ]);
         assert!(&expected == decoded.get(0).unwrap().as_ref().unwrap());
     }
-
     #[test]
     fn test_how_to_build_array() {
         // can try pattern buffer (take iterator, but unsafe) -> Scalar buffer -> PrimitiveArray
@@ -621,5 +806,6 @@ mod tests {
         println!("{:?}", r);
     }
 }
-// Map(Field { name: \"mapcol\", data_type: Struct([Field { name: \"key\", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"value\", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, false)\
-// Map(Field { name: \"mapcol\", data_type: Struct([Field { name: \"key\", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"value\", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, false)")
+
+// Map(Field { name: \"favoriteItems\", data_type: Struct([Field { name: \"key\", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"value\", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, true) got \
+// Map(Field { name: \"favoriteItems\", data_type: Struct([Field { name: \"key\", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"value\", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, false)")

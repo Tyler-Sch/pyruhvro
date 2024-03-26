@@ -48,6 +48,13 @@ fn deserialize_datum<'a>(py: Python<'a>, data: Vec<Vec<u8>>, writer_schema: &'a 
     Ok(ra)
 }
 
+#[pyfunction]
+fn deserialize_arrow(array: PyArrowType<ArrayData>, schema: &str) {
+    let parsed_schema = deserialize::parse_schema(schema).unwrap();
+    let r = deserialize::per_datum_deserialize_arrow(array.into(),&parsed_schema);
+}
+
+
 fn avro_to_pydict(data: &types::Value) -> PyResult<PyObject> {
     Python::with_gil(|py|{
     let d = PyDict::new(py);
