@@ -8,7 +8,7 @@ use pyo3::types::{PyLong,PyDict, PyInt, PyList};
 use pyo3::PyObject;
 use ruhvro::deserialize;
 use arrow::pyarrow::PyArrowType;
-use arrow::array::{make_array, ArrayData, BinaryArray, StringArray};
+use arrow::array::{make_array, ArrayData, BinaryArray, StringArray, StructArray, Array};
 
 #[pyfunction]
 fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
@@ -49,9 +49,12 @@ fn deserialize_datum<'a>(py: Python<'a>, data: Vec<Vec<u8>>, writer_schema: &'a 
 }
 
 #[pyfunction]
-fn deserialize_arrow(array: PyArrowType<ArrayData>, schema: &str) {
+fn deserialize_arrow(array: PyArrowType<ArrayData>, schema: &str) -> PyResult<PyArrowType<ArrayData>> {
     let parsed_schema = deserialize::parse_schema(schema).unwrap();
-    let r = deserialize::per_datum_deserialize_arrow(array.into(),&parsed_schema);
+    let array = array.0;
+    let array = make_array(array);
+    let r = deserialize::per_datum_deserialize_arrow(array,&parsed_schema);
+    Ok(PyArrowType(r.into_data()))
 }
 
 
@@ -201,6 +204,7 @@ fn pyruhvro(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mess_around, m)?)?;
     m.add_function(wrap_pyfunction!(from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize_datum_from_arrow, m)?)?;
+    m.add_function(wrap_pyfunction!(deserialize_arrow, m)?)?;
     let _ = m.add_function(wrap_pyfunction!(deserialize_datum, m)?)?;
     Ok(())
 }

@@ -81,7 +81,7 @@ pub fn per_datum_deserialize_arrow(
     data: ArrayRef,
     schema: &AvroSchema,
 ) -> StructArray {
-    let fields = to_arrow_schema(schema).unwrap();
+    let fields = to_arrow_schema(schema).unwrap().fields;
     let arr = data
         .as_any()
         .downcast_ref::<BinaryArray>()
@@ -95,7 +95,7 @@ pub fn per_datum_deserialize_arrow(
         match avro {
             Value::Record(inner) => {
                 let a = inner.into_iter().map(|(x, y)| y).collect::<Vec<_>>();
-                build_arrays_fields(&a, &mut builder, fields);
+                build_arrays_fields(&a, &mut builder, &fields);
             }
             _ => unimplemented!(),
         }
@@ -107,7 +107,7 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
     data.iter()
         .zip(fields)
         .enumerate()
-        .inspect(|i| println!("{:?}", i))
+        // .inspect(|i| println!("{:?}", i))
         .for_each(|(idx, (avro_val, field))| {
             match field.data_type() {
                 DataType::Boolean => {
@@ -640,8 +640,8 @@ mod tests {
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         let fields = crate::schema_translate::to_arrow_schema(&parsed_schema).unwrap();
         println!("{:?}", fields);
-        let r = per_datum_deserialize_arrow(&vec![encoded.clone()], &parsed_schema, &fields.fields);
-        println!("{:?}", r);
+        // let r = per_datum_deserialize_arrow(&vec![encoded.clone()], &parsed_schema, &fields.fields);
+        // println!("{:?}", r);
         // println!("{:?}", decoded);
     }
 
