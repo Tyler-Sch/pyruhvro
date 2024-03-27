@@ -4,16 +4,12 @@ use apache_avro::types;
 use apache_avro::types::Value as AvroValue;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyLong,PyDict, PyInt, PyList};
+use pyo3::types::{PyDict, PyList};
 use pyo3::PyObject;
 use ruhvro::deserialize;
 use arrow::pyarrow::PyArrowType;
-use arrow::array::{make_array, ArrayData, BinaryArray, StringArray, StructArray, Array};
+use arrow::array::{make_array, ArrayData, StringArray, Array, RecordBatch};
 
-#[pyfunction]
-fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-    Ok((a + b).to_string())
-}
 
 #[pyfunction]
 fn from_arrow<'a>(array: PyArrowType<ArrayData>) -> PyResult<Vec<String>> {
@@ -57,6 +53,16 @@ fn deserialize_arrow(array: PyArrowType<ArrayData>, schema: &str) -> PyResult<Py
     Ok(PyArrowType(r.into_data()))
 }
 
+#[pyfunction]
+fn deserialize_arrow_threaded(array: PyArrowType<ArrayData>, schema: &str) -> PyResult<Vec<PyArrowType<RecordBatch>>> {
+
+    let parsed_schema = deserialize::parse_schema(schema).unwrap();
+    let array = array.0;
+    let array = make_array(array);
+    let r = deserialize::per_datum_deserialize_arrow_multi(array,&parsed_schema);
+    let i = r.into_iter().map(|x| PyArrowType(x)).collect::<Vec<_>>();
+    Ok(i)
+}
 
 fn avro_to_pydict(data: &types::Value) -> PyResult<PyObject> {
     Python::with_gil(|py|{
@@ -110,101 +116,14 @@ fn avro_to_py(p: &PyDict, av: &AvroValue) -> PyObject {
     }
 }
 
-#[pyfunction]
-fn mess_around(a: &PyList) -> PyResult<HashMap<String, i32>> {
-    let z = a.extract::<Vec<i32>>()?;
-    let mut hm = HashMap::new();
-    for i in z {
-        let news = format!("{}_string", i);
-        hm.insert(news, i);
-    }
-    Ok(hm)
-}
-
-// #[pyfunction]
-// fn tes(py: Python<'_>) -> PyResult<&PyDict> {
-//     let a = PyDict::new(py);
-//     a.set_item("mykey", 23);
-//     a.set_item(1, 123);
-//     a.set_item("morestring", 1.2);
-//     Ok(a)
-
-// }
-
-#[pyfunction]
-fn tes() -> PyResult<MyObj> {
-    Ok(MyObj::Str("sure".into()))
-
-}
-
-#[pyfunction]
-fn tess() -> PyResult<Vec<HashMap<MyObj, MyObj>>> {
-    let mut outer = vec![];
-    for i in (0..1000000) {
-        let mut hm = HashMap::new();
-        hm.insert(MyObj::Str("sure".into()), MyObj::Int(13));
-        hm.insert(MyObj::Int(2), MyObj::Str("this thing is difficult".into()));
-        outer.push(hm);
-    }
-    Ok(outer)
-}
-
-#[pyfunction]
-fn tess2(py: Python) -> PyResult<Vec<&PyDict>> {
-    let mut outer = vec![];
-    for i in (0..1000000) {
-        let pd = PyDict::new(py);
-        pd.set_item("sure", 13);
-        pd.set_item(2, "this thing is difficult");
-
-        
-        outer.push(pd);
-    }
-    Ok(outer)
-}
-// #[pyfunction]
-// fn tes() -> PyResult<&PyDict> {
-//     Python::with_gil(|py| {
-//         let a = PyDict::new(py).to_object(py);
-//     });
-//     a.set_item("mykey", 23);
-//     a.set_item(1, 123);
-//     a.set_item("morestring", 1.2);
-//     Ok(a)
-// }
-#[derive(FromPyObject, Debug, PartialEq, Eq, Hash)]
-enum MyObj {
-    Int(i32),
-    Str(String),
-}
-
-impl IntoPy<PyObject> for MyObj {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        let p = match self {
-            MyObj::Int(i) => i.into_py(py),
-            MyObj::Str(s) => s.into_py(py)
-        };
-        p
-    }
-
-}
-
-enum MyCollec {
-    HM(MyObj, MyObj),
-    Lis(Vec<MyObj>),
-}
 
 /// A Python module implemented in Rust.
 #[pymodule]
 fn pyruhvro(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
-    m.add_function(wrap_pyfunction!(tes, m)?)?;
-    m.add_function(wrap_pyfunction!(tess, m)?)?;
-    m.add_function(wrap_pyfunction!(tess2, m)?)?;
-    m.add_function(wrap_pyfunction!(mess_around, m)?)?;
     m.add_function(wrap_pyfunction!(from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize_datum_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize_arrow, m)?)?;
+    m.add_function(wrap_pyfunction!(deserialize_arrow_threaded, m)?)?;
     let _ = m.add_function(wrap_pyfunction!(deserialize_datum, m)?)?;
     Ok(())
 }

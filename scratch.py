@@ -1,4 +1,4 @@
-from pyruhvro import  deserialize_datum_from_arrow, deserialize_datum, deserialize_arrow
+from pyruhvro import  deserialize_datum_from_arrow, deserialize_datum, deserialize_arrow, deserialize_arrow_threaded
 import time
 
 start_time = time.time()
@@ -80,9 +80,13 @@ schema = """{
 # result = deserialize_datum_from_arrow(arr, schema)
 # result = from_arrow(arr)
 ################################################################################
+# import pyarrow as pa
+# arr = pa.array(data, pa.binary())
+# result = deserialize_arrow(arr, schema)
+################################################################################
 import pyarrow as pa
 arr = pa.array(data, pa.binary())
-result = deserialize_arrow(arr, schema)
+result = deserialize_arrow_threaded(arr, schema)
 ################################################################################
 # result = deserialize_datum(data, schema)
 # print(result)
