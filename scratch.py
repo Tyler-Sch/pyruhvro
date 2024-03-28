@@ -1,4 +1,4 @@
-from pyruhvro import  deserialize_datum_from_arrow, deserialize_datum, deserialize_arrow, deserialize_arrow_threaded
+from pyruhvro import deserialize_arrow, deserialize_arrow_threaded
 import time
 
 start_time = time.time()
@@ -6,7 +6,7 @@ start_time = time.time()
 #     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
 with open("/home/goser/Downloads/ruhvro/test_1mil.kafka", "r") as f:
     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
-    # data = [i for i in f.readlines()]
+#     data = [i for i in f.readlines()]
 
 schema = """{
   "type": "record",
@@ -74,6 +74,10 @@ schema = """{
 # from io import BytesIO
 # schema = fastavro.parse_schema(json.loads(schema))
 # result = [fastavro.schemaless_reader(BytesIO(i), schema) for i in data]
+################################################################################
+# deserialize with threaded rust
+# result = deserialize_datum(data, schema)
+
 ################################################################################
 # import pyarrow as pa
 # arr = pa.array(data, pa.binary())

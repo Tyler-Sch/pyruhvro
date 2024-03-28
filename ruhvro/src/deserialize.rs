@@ -1,7 +1,5 @@
 use crate::schema_translate::to_arrow_schema;
-use std::collections::HashMap;
 use std::error::Error;
-use std::hash::Hasher;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -9,36 +7,58 @@ use apache_avro::from_avro_datum;
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
 use arrow::array::{
-    Array, ArrayBuilder, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanBuilder,
-    Int32Builder, Int64Builder, ListBuilder, MapBuilder,
-     RecordBatch, StringBuilder, StructArray, StructBuilder,
+    Array, ArrayBuilder, ArrayRef, BinaryArray, BooleanBuilder, Int32Builder, Int64Builder,
+    ListBuilder, MapBuilder, RecordBatch, StringBuilder, StructArray, StructBuilder,
     TimestampMillisecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Fields};
 use rayon::prelude::*;
 
+// TODO: Fix null cols
+// TODO: Implement structs in lists
+// TODO: Fix map type to take whatever types avro gives it
+// TODO: create macro to reduce repeated code
+// TODO: Fix multithreading not getting all the records
+
+macro_rules! add_val {
+    ($val:expr,$target:ident,$field: expr, $($type:ident),*) => {{
+        let value;
+            if $field.is_nullable() {
+                if let Value::Union(_, b) = $val {
+                    value = b.as_ref();
+                } else {
+                    value = $val;
+                }
+            } else {value = $val;}
+
+        $(
+        if let &Value::$type(d) = value {
+            println!("{:?}", value);
+           $target.append_value(d);
+        } )*
+        else {
+            $target.append_null()
+        }
+    }}
+}
+
+#[inline]
+fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Value {
+    let val;
+    if field.is_nullable() {
+        if let Value::Union(_, b) = value {
+            val = b.as_ref();
+        } else {
+            val = value;
+        }
+    } else {
+        val = value;
+    }
+    val
+}
+
 pub fn parse_schema(schema_string: &str) -> Result<AvroSchema> {
     Ok(AvroSchema::parse_str(schema_string)?)
-}
-
-pub fn per_datum_deserialize(data: &Vec<Vec<u8>>, schema: &AvroSchema) -> Box<Vec<Result<Value>>> {
-    Box::new(
-        data.into_iter()
-            .map(|datum| {
-                let mut sliced = &datum[..];
-                Ok(from_avro_datum(schema, &mut sliced, None)?)
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-
-pub fn per_datum_deserialize_multi(data: &Vec<Vec<u8>>, schema: &AvroSchema) -> Vec<Result<Value>> {
-    data.par_iter()
-        .map(|datum| {
-            let mut sliced = &datum[..];
-            Ok(from_avro_datum(schema, &mut sliced, None)?)
-        })
-        .collect::<Vec<_>>()
 }
 
 #[derive(Debug)]
@@ -48,33 +68,6 @@ impl std::fmt::Display for DeserialzeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         todo!()
     }
-}
-
-pub fn per_datum_arrow_deserialize(data: ArrayRef, schema: &AvroSchema) -> Vec<Vec<Result<Value>>> {
-    let arr = data
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .ok_or_else(|| DeserialzeError)
-        .unwrap();
-    let mut slices = vec![];
-    let cores = 24usize;
-    let chunk_size = arr.len() / cores;
-    for i in (0..cores) {
-        let slice = arr.slice(i * chunk_size, chunk_size);
-        slices.push(slice)
-    }
-    let p = slices
-        .par_iter()
-        .map(|x| {
-            x.iter()
-                .map(|inn| {
-                    let mut a = inn.unwrap();
-                    Ok(from_avro_datum(schema, &mut a, None).unwrap())
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    p
 }
 
 pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> StructArray {
@@ -90,7 +83,7 @@ pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> Struc
         let avro = from_avro_datum(schema, &mut sliced, None).unwrap();
         match avro {
             Value::Record(inner) => {
-                let a = inner.into_iter().map(|(x, y)| y).collect::<Vec<_>>();
+                let a = inner.into_iter().map(|(_, y)| y).collect::<Vec<_>>();
                 build_arrays_fields(&a, &mut builder, &fields);
             }
             _ => unimplemented!(),
@@ -110,7 +103,7 @@ pub fn per_datum_deserialize_arrow_multi(data: ArrayRef, schema: &AvroSchema) ->
     let mut slices = vec![];
     let cores = 24usize;
     let chunk_size = arr.len() / cores;
-    for i in (0..cores) {
+    for i in 0..cores {
         let slice = arr.slice(i * chunk_size, chunk_size);
         slices.push(slice)
     }
@@ -123,7 +116,7 @@ pub fn per_datum_deserialize_arrow_multi(data: ArrayRef, schema: &AvroSchema) ->
                 let deserialized = from_avro_datum(schema, &mut sliced, None).unwrap();
                 match deserialized {
                     Value::Record(inner) => {
-                        let a = inner.into_iter().map(|(x, y)| y).collect::<Vec<_>>();
+                        let a = inner.into_iter().map(|(_, y)| y).collect::<Vec<_>>();
                         build_arrays_fields(&a, &mut builder, &fields);
                     }
                     _ => unimplemented!(),
@@ -148,35 +141,19 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                     let target = builder
                         .field_builder::<BooleanBuilder>(idx)
                         .expect("Did not find Bool builder");
-                    // can be bool or null
-                    if let &Value::Boolean(b) = avro_val {
-                        target.append_value(b);
-                    } else {
-                        target.append_null();
-                    }
+                    add_val!(avro_val, target, field, Boolean);
                 }
                 DataType::Int32 => {
                     let target = builder
                         .field_builder::<Int32Builder>(idx)
                         .expect("Did not find Int builder");
-                    if let &Value::Int(i) = avro_val {
-                        target.append_value(i);
-                    } else {
-                        target.append_null();
-                    }
+                    add_val!(avro_val, target, field, Int);
                 }
                 DataType::Int64 => {
                     let target = builder
                         .field_builder::<Int64Builder>(idx)
                         .expect("Did not find Int64 builder");
-                    if let &Value::Long(i) = avro_val {
-                        target.append_value(i);
-                    }
-                    if let &Value::TimestampMillis(i) = avro_val {
-                        target.append_value(i);
-                    } else {
-                        target.append_null();
-                    }
+                    add_val!(avro_val, target, field, Long, TimestampMillis);
                 }
                 DataType::UInt8 => {}
                 DataType::UInt16 => {}
@@ -186,14 +163,10 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                 DataType::Float32 => {}
                 DataType::Float64 => {}
                 DataType::Timestamp(a, b) => {
-                    let ta = builder
+                    let target = builder
                         .field_builder::<TimestampMillisecondBuilder>(idx)
                         .expect("expected TimestampMillisecondBuilder");
-                    if let &Value::TimestampMillis(i) = avro_val {
-                        ta.append_value(i);
-                    } else {
-                        ta.append_null();
-                    }
+                    add_val!(avro_val, target, field, TimestampMillis);
                 }
                 DataType::Date32 => {}
                 DataType::Date64 => {}
@@ -204,7 +177,9 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                     let target = builder
                         .field_builder::<StringBuilder>(idx)
                         .expect("Did not find StringBuilder");
-                    if let Value::String(s) = avro_val {
+
+                    let val = get_val_from_possible_union(&avro_val, field);
+                    if let Value::String(s) = val {
                         target.append_value(s);
                     } else {
                         target.append_null();
@@ -247,7 +222,14 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                             idx,
                         )
                         .expect("MapBuilder not found");
-                    if let Value::Map(hm) = avro_val {
+
+                    let inner_datatype = match a.data_type() {
+                        DataType::Struct(flds) => flds.to_vec()[1].clone(),
+                        _ => unimplemented!(),
+                    };
+
+                    let val = get_val_from_possible_union(avro_val, field);
+                    if let Value::Map(hm) = val {
                         hm.iter().for_each(|(k, v)| {
                             // println!("{:?}", a);
                             add_to_list(
@@ -255,11 +237,7 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                                 ta.keys(),
                                 &Field::new("key", DataType::Utf8, false),
                             );
-                            add_to_list(
-                                v,
-                                ta.values(),
-                                &Field::new("value", DataType::Int32, false),
-                            );
+                            add_to_list(v, ta.values(), &inner_datatype);
                         });
                         ta.append(true);
                     }
@@ -273,39 +251,27 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
 fn add_to_list(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &Field) -> () {
     match field.data_type() {
         DataType::Boolean => {
-            let ta = builder
+            let target = builder
                 .as_any_mut()
                 .downcast_mut::<BooleanBuilder>()
                 .expect("expected boolean builder");
-            if let Value::Boolean(b) = data {
-                ta.append_value(*b);
-            } else {
-                ta.append_null();
-            }
+            add_val!(data, target, field, Boolean);
         }
         // DataType::Int8 => {}
         // DataType::Int16 => {}
         DataType::Int32 => {
-            let ta = builder
+            let target = builder
                 .as_any_mut()
                 .downcast_mut::<Int32Builder>()
                 .expect("Did not find Int builder");
-            if let &Value::Int(i) = data {
-                ta.append_value(i);
-            } else {
-                ta.append_null();
-            }
+            add_val!(data, target, field, Int);
         }
         DataType::Int64 => {
             let target = builder
                 .as_any_mut()
                 .downcast_mut::<Int64Builder>()
                 .expect("Did not find Int64 builder");
-            if let &Value::Long(i) = data {
-                target.append_value(i);
-            } else {
-                target.append_null();
-            }
+            add_val!(data, target, field, Long);
         }
         // DataType::UInt8 => {}
         // DataType::UInt16 => {}
@@ -343,15 +309,26 @@ fn add_to_list(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &Field)
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use arrow::array::{Int32Array, Int32Builder, ListBuilder, StringArray, StructArray};
-    use arrow::buffer::NullBuffer;
-    use arrow::datatypes::{Field, Fields};
 
     use super::*;
     use crate::utils;
+    use arrow::array;
+    use arrow::datatypes::DataType::Int32;
 
+    #[test]
+    fn test_nulls_in_records() {
+        let f1 = Field::new("nullints", DataType::Int32, true);
+        // let f2 = Field::new("nullstring", DataType::Utf8, true);
+        let mut b1: Box<dyn ArrayBuilder> = Box::new(Int32Builder::new());
+        // let b2 = StringBuilder::new();
+        let avro_int_1 = Value::Union(1, Box::new(Value::Int(2)));
+        let avro_int_2 = Value::Union(0, Box::new(Value::Null));
+        add_to_list(&avro_int_1, &mut b1, &f1);
+        add_to_list(&avro_int_2, &mut b1, &f1);
+        let r = b1.finish();
+        println!("{:?}", r);
+
+    }
     #[test]
     fn test_per_datum_deserialize_arrow() {
         let s = r#"{
@@ -414,13 +391,14 @@ mod tests {
         let avro_datum = "4834346437643065662d613264662d343833652d393261312d313532333830366164656334380a4c696e64610857617265022c6c696e646173636f7474406578616d706c652e6e6574062628323636293734302d31323737783031313432283030312d3935392d3839342d36353030783739392a3030312d3339362d3831392d363830307830303139000006044d72100866696e640e10617070726f6163680c00c0f691c7c35f";
         let encoded = utils::decode_hex(avro_datum);
         let newv = vec![&encoded[..], &encoded[..], &encoded[..], &encoded[..]];
-        // let arrow_array = Arc::new(array::BinaryArray::from_vec(newv)) as ArrayRef;
+        let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
         // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         let fields = crate::schema_translate::to_arrow_schema(&parsed_schema).unwrap();
         println!("{:?}", fields);
-        // let r = per_datum_deserialize_arrow(&vec![encoded.clone()], &parsed_schema, &fields.fields);
-        // println!("{:?}", r);
+        // let data =
+        let result = per_datum_deserialize_arrow(arrow_array, &parsed_schema);
+        println!("{:?}", result);
         // println!("{:?}", decoded);
     }
 
@@ -485,47 +463,47 @@ mod tests {
         let parsed_schema = parse_schema(s).unwrap();
         let avro_datum = "4834346437643065662d613264662d343833652d393261312d313532333830366164656334380a4c696e64610857617265022c6c696e646173636f7474406578616d706c652e6e6574062628323636293734302d31323737783031313432283030312d3935392d3839342d36353030783739392a3030312d3339362d3831392d363830307830303139000006044d72100866696e640e10617070726f6163680c00c0f691c7c35f";
         let encoded = utils::decode_hex(avro_datum);
-        let decoded = per_datum_deserialize(&vec![encoded], &parsed_schema);
-
-        let expected = Value::Record(vec![
-            (
-                "userId".into(),
-                Value::String("44d7d0ef-a2df-483e-92a1-1523806adec4".into()),
-            ),
-            ("age".into(), Value::Int(28)),
-            (
-                "fullName".into(),
-                Value::Record(vec![
-                    ("firstName".into(), Value::String("Linda".into())),
-                    ("lastName".into(), Value::String("Ware".into())),
-                ]),
-            ),
-            (
-                "email".into(),
-                Value::Union(1, Box::new(Value::String("lindascott@example.net".into()))),
-            ),
-            (
-                "phoneNumbers".into(),
-                Value::Array(vec![
-                    Value::String("(266)740-1277x01142".into()),
-                    Value::String("001-959-894-6500x799".into()),
-                    Value::String("001-396-819-6800x0019".into()),
-                ]),
-            ),
-            ("isPremiumMember".into(), Value::Boolean(false)),
-            (
-                "favoriteItems".into(),
-                Value::Map(HashMap::from([
-                    ("Mr".into(), Value::Int(8)),
-                    ("find".into(), Value::Int(7)),
-                    ("approach".into(), Value::Int(6)),
-                ])),
-            ),
-            (
-                "registrationDate".into(),
-                Value::TimestampMillis(1641154756000i64),
-            ),
-        ]);
-        assert!(&expected == decoded.get(0).unwrap().as_ref().unwrap());
+        // let decoded = per_datum_deserialize(&vec![encoded], &parsed_schema);
+        //
+        // let expected = Value::Record(vec![
+        //     (
+        //         "userId".into(),
+        //         Value::String("44d7d0ef-a2df-483e-92a1-1523806adec4".into()),
+        //     ),
+        //     ("age".into(), Value::Int(28)),
+        //     (
+        //         "fullName".into(),
+        //         Value::Record(vec![
+        //             ("firstName".into(), Value::String("Linda".into())),
+        //             ("lastName".into(), Value::String("Ware".into())),
+        //         ]),
+        //     ),
+        //     (
+        //         "email".into(),
+        //         Value::Union(1, Box::new(Value::String("lindascott@example.net".into()))),
+        //     ),
+        //     (
+        //         "phoneNumbers".into(),
+        //         Value::Array(vec![
+        //             Value::String("(266)740-1277x01142".into()),
+        //             Value::String("001-959-894-6500x799".into()),
+        //             Value::String("001-396-819-6800x0019".into()),
+        //         ]),
+        //     ),
+        //     ("isPremiumMember".into(), Value::Boolean(false)),
+        //     (
+        //         "favoriteItems".into(),
+        //         Value::Map(HashMap::from([
+        //             ("Mr".into(), Value::Int(8)),
+        //             ("find".into(), Value::Int(7)),
+        //             ("approach".into(), Value::Int(6)),
+        //         ])),
+        //     ),
+        //     (
+        //         "registrationDate".into(),
+        //         Value::TimestampMillis(1641154756000i64),
+        //     ),
+        // ]);
+        // assert!(&expected == decoded.get(0).unwrap().as_ref().unwrap());
     }
 }

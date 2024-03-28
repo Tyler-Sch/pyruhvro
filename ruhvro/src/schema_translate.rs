@@ -2,9 +2,8 @@ use anyhow::Result;
 use apache_avro::schema::{Alias, DecimalSchema, EnumSchema, FixedSchema, Name, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
-use arrow::datatypes::DataType::Struct;
 use arrow::datatypes::{
-    DataType, Field, FieldRef, Fields, IntervalUnit, Schema, TimeUnit, UnionFields, UnionMode,
+    DataType, Field, Fields, IntervalUnit, Schema, TimeUnit, UnionFields, UnionMode,
 };
 use std::collections::HashMap;
 use std::convert::TryFrom;
