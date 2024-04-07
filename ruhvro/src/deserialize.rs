@@ -12,6 +12,7 @@ use arrow::array::{
     TimestampMillisecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Fields};
+use arrow::datatypes::DataType::Union;
 use rayon::prelude::*;
 
 // TODO: Fix null cols
@@ -19,6 +20,7 @@ use rayon::prelude::*;
 // TODO: Fix map type to take whatever types avro gives it
 // TODO: create macro to reduce repeated code
 // TODO: Fix multithreading not getting all the records
+// TODO: Figure out how to deal with actual unions
 
 macro_rules! add_val {
     ($val:expr,$target:ident,$field: expr, $($type:ident),*) => {{
@@ -35,7 +37,7 @@ macro_rules! add_val {
 #[inline]
 fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Value {
     let val;
-    if field.is_nullable() {
+    if field.is_nullable()  {
         if let Value::Union(_, b) = value {
             val = b.as_ref();
         } else {
@@ -60,7 +62,7 @@ impl std::fmt::Display for DeserialzeError {
     }
 }
 
-pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> StructArray {
+pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> RecordBatch {
     let fields = to_arrow_schema(schema).unwrap().fields;
     let arr = data
         .as_any()
@@ -79,10 +81,10 @@ pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> Struc
             _ => unimplemented!(),
         }
     });
-    builder.finish()
+    builder.finish().into()
 }
 
-pub fn per_datum_deserialize_arrow_multi(data: ArrayRef, schema: &AvroSchema) -> Vec<RecordBatch> {
+pub fn per_datum_deserialize_arrow_multi(data: ArrayRef, schema: &AvroSchema, num_chunks: usize) -> Vec<RecordBatch> {
     let arrow_schema = Arc::new(to_arrow_schema(schema).unwrap());
     let fields = &arrow_schema.fields;
     let arr = data
@@ -91,7 +93,7 @@ pub fn per_datum_deserialize_arrow_multi(data: ArrayRef, schema: &AvroSchema) ->
         .ok_or_else(|| DeserialzeError)
         .unwrap();
     let mut slices = vec![];
-    let cores = 24usize;
+    let cores = num_chunks;
     let chunk_size = arr.len() / cores;
     for i in 0..cores {
         let slice = arr.slice(i * chunk_size, chunk_size);
@@ -125,7 +127,7 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
         .zip(fields)
         .map(|(aval, f)| (get_val_from_possible_union(aval, f), f))
         .enumerate()
-        .inspect(|i| println!("{:?}", i))
+        // .inspect(|i| println!("{:?}", i))
         .for_each(|(idx, (avro_val, field))| {
             match field.data_type() {
                 DataType::Boolean => {
@@ -643,5 +645,3 @@ mod tests {
     }
 }
 
-// List(Field { name: \"item\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }) got \
-// List(Field { name: \"item\", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} })")
