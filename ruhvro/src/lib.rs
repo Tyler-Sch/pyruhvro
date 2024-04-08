@@ -1,8 +1,8 @@
 #![warn(clippy::pedantic)]
 
 pub mod deserialize;
-mod utils;
 mod schema_translate;
+mod utils;
 
 #[cfg(test)]
 mod tests {

@@ -2,11 +2,15 @@ from pyruhvro import deserialize_arrow, deserialize_arrow_threaded
 import time
 
 # start_time = time.time()
-with open("/Users/tylerschauer/rust/ruhvro2/ruhvro/test_20k.kafka", "r") as f:
-    data = [bytes.fromhex(i.strip()) for i in f.readlines()]
+# with open("/Users/tylerschauer/rust/ruhvro2/ruhvro/test_20k.kafka", "r") as f:
+#     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
 # with open("/Users/tylerschauer/rust/ruhvro2/ruhvro/test_1mil.kafka", "r") as f:
 #     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
 #     data = [i for i in f.readlines()]
+# with open("/home/goser/rust/ruhvro2/test_20k.kafka", "r") as f:
+#     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
+with open("/home/goser/rust/ruhvro2/test_1mil.kafka", "r") as f:
+    data = [bytes.fromhex(i.strip()) for i in f.readlines()]
 
 schema = """{
   "type": "record",
@@ -84,13 +88,13 @@ start_time = time.time()
 # result = deserialize_datum_from_arrow(arr, schema)
 # result = from_arrow(arr)
 ################################################################################
-import pyarrow as pa
-arr = pa.array(data, pa.binary())
-result = deserialize_arrow(arr, schema)
-################################################################################
 # import pyarrow as pa
 # arr = pa.array(data, pa.binary())
-# result = deserialize_arrow_threaded(arr, schema, 4)
+# result = deserialize_arrow(arr, schema)
+################################################################################
+import pyarrow as pa
+arr = pa.array(data, pa.binary())
+result = deserialize_arrow_threaded(arr, schema, 8)
 ################################################################################
 # result = deserialize_datum(data, schema)
 # print(result)

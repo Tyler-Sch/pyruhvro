@@ -6,26 +6,23 @@ use anyhow::Result;
 use apache_avro::from_avro_datum;
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
-use arrow::array::{
-    Array, ArrayBuilder, ArrayRef, BinaryArray, BooleanBuilder, Float32Builder, Int32Builder,
-    Int64Builder, ListBuilder, MapBuilder, RecordBatch, StringBuilder, StructArray, StructBuilder,
-    TimestampMillisecondBuilder,
-};
-use arrow::datatypes::{DataType, Field, Fields};
-use arrow::datatypes::DataType::Union;
+use arrow::array::{Array, ArrayBuilder, ArrayRef, BinaryArray, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, ListBuilder, MapBuilder, RecordBatch, StringBuilder, StructArray, StructBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder};
+use arrow::datatypes::{DataType, Field, Fields, TimeUnit};
 use rayon::prelude::*;
 
-// TODO: Fix null cols
-// TODO: Implement structs in lists
-// TODO: Fix map type to take whatever types avro gives it
-// TODO: create macro to reduce repeated code
 // TODO: Fix multithreading not getting all the records
 // TODO: Figure out how to deal with actual unions
+// TODO: experiment with threads
+// TODO: enums
+// TODO: binary array
+// TODO: refactor full avro deserialization to lib.rs
+// TODO: maybe refactor conversion Value -> Arrow into one function if possible (Struct builder is rigid)
 
 macro_rules! add_val {
     ($val:expr,$target:ident,$field: expr, $($type:ident),*) => {{
+        let val = get_val_from_possible_union($val, $field);
         $(
-        if let &Value::$type(d) = $val {
+        if let &Value::$type(d) = val {
            $target.append_value(d);
         } )*
         else {
@@ -37,7 +34,7 @@ macro_rules! add_val {
 #[inline]
 fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Value {
     let val;
-    if field.is_nullable()  {
+    if field.is_nullable() {
         if let Value::Union(_, b) = value {
             val = b.as_ref();
         } else {
@@ -84,7 +81,11 @@ pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> Recor
     builder.finish().into()
 }
 
-pub fn per_datum_deserialize_arrow_multi(data: ArrayRef, schema: &AvroSchema, num_chunks: usize) -> Vec<RecordBatch> {
+pub fn per_datum_deserialize_arrow_multi(
+    data: ArrayRef,
+    schema: &AvroSchema,
+    num_chunks: usize,
+) -> Vec<RecordBatch> {
     let arrow_schema = Arc::new(to_arrow_schema(schema).unwrap());
     let fields = &arrow_schema.fields;
     let arr = data
@@ -125,7 +126,7 @@ pub fn per_datum_deserialize_arrow_multi(data: ArrayRef, schema: &AvroSchema, nu
 fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &Fields) -> () {
     data.iter()
         .zip(fields)
-        .map(|(aval, f)| (get_val_from_possible_union(aval, f), f))
+        // .map(|(aval, f)| (get_val_from_possible_union(aval, f), f))
         .enumerate()
         // .inspect(|i| println!("{:?}", i))
         .for_each(|(idx, (avro_val, field))| {
@@ -148,34 +149,51 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                         .expect("Did not find Int64 builder");
                     add_val!(avro_val, target, field, Long, TimestampMillis);
                 }
-                DataType::UInt8 => {}
-                DataType::UInt16 => {}
-                DataType::UInt32 => {}
-                DataType::UInt64 => {}
-                DataType::Float16 => {}
                 DataType::Float32 => {
                     let target = builder
                         .field_builder::<Float32Builder>(idx)
-                        .expect("Did not find Int64 builder");
+                        .expect("Did not find Float32 builder");
                     add_val!(avro_val, target, field, Float);
                 }
-                DataType::Float64 => {}
-                DataType::Timestamp(a, b) => {
+                DataType::Float64 => {
                     let target = builder
-                        .field_builder::<TimestampMillisecondBuilder>(idx)
-                        .expect("expected TimestampMillisecondBuilder");
-                    add_val!(avro_val, target, field, TimestampMillis);
+                        .field_builder::<Float64Builder>(idx)
+                        .expect("Did not find Float32 builder");
+                    add_val!(avro_val, target, field, Double);
                 }
-                DataType::Date32 => {}
+                DataType::Timestamp(a, b) => {
+                    let _ = match a {
+                        TimeUnit::Millisecond => {
+                             let target = builder
+                                .field_builder::<TimestampMillisecondBuilder>(idx)
+                                .expect("expected TimestampMillisecond Builder");
+                            add_val!(avro_val, target, field, TimestampMillis);
+                        }
+                        TimeUnit::Microsecond => {
+                            let target = builder
+                                .field_builder::<TimestampMicrosecondBuilder>(idx)
+                                .expect("expected TimestampMicrosecond Builder");
+                            add_val!(avro_val, target, field, TimestampMicros);
+                        }
+                        _ => unimplemented!()
+                    };
+                }
+                DataType::Date32 => {
+                    let target = builder
+                        .field_builder::<Date32Builder>(idx)
+                        .expect("expected Date32Builder");
+                    add_val!(avro_val, target, field, Date);
+                }
                 DataType::Date64 => {}
                 DataType::Time32(_) => {}
                 DataType::Time64(_) => {}
-                DataType::Binary => {}
+                DataType::Binary => {
+                    unimplemented!();
+                }
                 DataType::Utf8 => {
                     let target = builder
                         .field_builder::<StringBuilder>(idx)
                         .expect("Did not find StringBuilder");
-
                     let val = get_val_from_possible_union(&avro_val, field);
                     if let Value::String(s) = val {
                         target.append_value(s);
@@ -285,8 +303,35 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
             add_val!(data, target, field, Float);
         }
         // DataType::Float64 => {}
-        // DataType::Timestamp(_, _) => {}
-        // DataType::Date32 => {}
+        DataType::Timestamp(a, _) => {
+            let _ = match a {
+                TimeUnit::Millisecond => {
+                    let target = builder
+                        .as_any_mut()
+                        .downcast_mut::<TimestampMillisecondBuilder>()
+                        .expect("Did not find TimestampMillisecond builder");
+                    add_val!(data, target, field, TimestampMillis);
+                }
+                TimeUnit::Microsecond => {
+                    let target = builder
+                        .as_any_mut()
+                        .downcast_mut::<TimestampMicrosecondBuilder>()
+                        .expect("Did not find TimestampMicrosecond builder");
+                    add_val!(data, target, field, TimestampMicros);
+                }
+                _ => unimplemented!()
+            };
+        }
+        DataType::Date32 => {
+            let target = builder
+                .as_any_mut()
+                .downcast_mut::<Date32Builder>()
+                .expect("Did not find Date32 builder");
+            // let target = builder
+            //     .field_builder::<Date32Builder>(idx)
+            //     .expect("expected Date32Builder");
+            add_val!(data, target, field, Date);
+        }
         // DataType::Date64 => {}
         // DataType::Time32(_) => {}
         // DataType::Time64(_) => {}
@@ -305,7 +350,19 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
             }
         }
         // DataType::List(_) => {}
-        // DataType::Struct(_) => {}
+        DataType::Struct(i) => {
+            let ta = builder
+                .as_any_mut()
+                .downcast_mut::<StructBuilder>()
+                .expect("Did not find StringBuilder");
+            if let Value::Record(arr_data) = data {
+                let inner_array_data = arr_data
+                    .into_iter()
+                    .map(|(x, y)| y.clone())
+                    .collect::<Vec<_>>();
+                build_arrays_fields(&inner_array_data, ta, i);
+            }
+        }
         // DataType::Union(_, _) => {}
         // DataType::Map(_, _) => {}
         _ => unimplemented!(),
@@ -392,7 +449,7 @@ mod tests {
         l.values().append_value(3);
         l.append(true);
         let list: ArrayRef = Arc::new(l.finish());
-        let e_rec  = Arc::new(
+        let e_rec = Arc::new(
             StructArray::try_from(vec![
                 ("nested_float_field", e_nested_float),
                 ("nested_list_field", list),
@@ -455,7 +512,36 @@ mod tests {
     }
     #[test]
     fn test_struct_in_list() {
-        unimplemented!();
+        // avro
+        let rec1 = Value::Record(vec![
+            ("IntCol".to_string(), Value::Int(2)),
+            ("StrCol".to_string(), Value::String("scol".to_string())),
+        ]);
+        let rec2 = Value::Record(vec![
+            ("IntCol".to_string(), Value::Int(3)),
+            ("StrCol".to_string(), Value::String("scol2".to_string())),
+        ]);
+        let l = Value::Array(vec![rec1, rec2]);
+        // let outer_rec = Value::Record(vec![("ListCol".to_string(), l)]);
+
+        // arrow schema
+        let f1 = Field::new("IntCol", DataType::Int32, false);
+        let f2 = Field::new("StrCol", DataType::Utf8, false);
+        let inner_fields = Fields::from(vec![f1, f2]);
+        let f3 = Arc::new(Field::new(
+            "InnerStruct",
+            DataType::Struct(inner_fields),
+            false,
+        ));
+        let list_field = Field::new("ListCol", DataType::List(f3), false);
+        // let list_fields = Arc::new(Fields::from(vec![list_field]);
+        // let fields = Fields::from()
+
+        // builder
+        // let builder = StructBuilder::from_fields();
+
+        // convert
+        // build_arrays_fields(&vec![l], )
     }
 
     #[test]
@@ -643,5 +729,89 @@ mod tests {
         // ]);
         // assert!(&expected == decoded.get(0).unwrap().as_ref().unwrap());
     }
-}
 
+    #[test]
+    fn test_struct_nested_in_list() {
+        let s = r#"{
+    "type": "record",
+    "name": "User",
+    "namespace": "com.example",
+    "fields": [
+        {
+            "name": "firstName",
+            "type": "string"
+        },
+        {
+            "name": "lastName",
+            "type": "string"
+        },
+        {
+            "name": "age",
+            "type": "int"
+        },
+        {
+            "name": "addresses",
+            "type": {
+                "type": "array",
+                "items": {
+                    "type": "record",
+                    "name": "Address",
+                    "fields": [
+                        {
+                            "name": "street",
+                            "type": "string"
+                        },
+                        {
+                            "name": "city",
+                            "type": "string"
+                        },
+                        {
+                            "name": "zipCode",
+                            "type": "string"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "email",
+            "type": ["null", "string"],
+            "default": "null"
+        }
+    ]
+          }"#;
+        let parsed_schema = parse_schema(s).unwrap();
+        let avro_datum = "084a6f686e06446f653c041431323320456c6d20537412536f6d6577686572650a313233343514343536204f616b20537410416e7977686572650a36373839300002286a6f686e2e646f65406578616d706c652e636f6d";
+        let encoded = utils::decode_hex(avro_datum);
+        let newv = vec![&encoded[..] ];
+        let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
+        // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        let fields = crate::schema_translate::to_arrow_schema(&parsed_schema).unwrap();
+        println!("{:?}", fields);
+        let result = per_datum_deserialize_arrow(arrow_array, &parsed_schema);
+        println!("{:?}", result);
+    }
+
+    #[test]
+    fn test_timestamps() {
+        let s = r#"{
+           "type": "record",
+    "name": "TimestampTypes",
+    "fields": [
+        {"name": "date", "type": {"type": "int", "logicalType": "date"}}
+    ]
+          }"#;
+        let parsed_schema = parse_schema(s).unwrap();
+        let avro_datum = "ccb502";
+        let encoded = utils::decode_hex(avro_datum);
+        let newv = vec![&encoded[..] ];
+        let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
+        // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        let fields = crate::schema_translate::to_arrow_schema(&parsed_schema).unwrap();
+        println!("{:?}", fields);
+        let result = per_datum_deserialize_arrow(arrow_array, &parsed_schema);
+        println!("{:?}", result);
+    }
+}
