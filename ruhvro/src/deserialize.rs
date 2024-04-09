@@ -6,17 +6,24 @@ use anyhow::Result;
 use apache_avro::from_avro_datum;
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
-use arrow::array::{Array, ArrayBuilder, ArrayRef, BinaryArray, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, ListBuilder, MapBuilder, RecordBatch, StringBuilder, StructArray, StructBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder};
+use arrow::array::{
+    Array, ArrayBuilder, ArrayRef, BinaryArray, BooleanBuilder, Date32Builder,
+   Float32Builder,
+    Float64Builder, Int32Builder, Int64Builder, ListBuilder, MapBuilder, RecordBatch,
+    StringBuilder, StructArray, StructBuilder, TimestampMicrosecondBuilder,
+    TimestampMillisecondBuilder,
+};
 use arrow::datatypes::{DataType, Field, Fields, TimeUnit};
+use arrow::ipc::DurationBuilder;
 use rayon::prelude::*;
 
-// TODO: Fix multithreading not getting all the records
 // TODO: Figure out how to deal with actual unions
 // TODO: experiment with threads
 // TODO: enums
 // TODO: binary array
 // TODO: refactor full avro deserialization to lib.rs
 // TODO: maybe refactor conversion Value -> Arrow into one function if possible (Struct builder is rigid)
+// TODO: Durations
 
 macro_rules! add_val {
     ($val:expr,$target:ident,$field: expr, $($type:ident),*) => {{
@@ -97,8 +104,11 @@ pub fn per_datum_deserialize_arrow_multi(
     let cores = num_chunks;
     let chunk_size = arr.len() / cores;
     for i in 0..cores {
-        let slice = arr.slice(i * chunk_size, chunk_size);
-        slices.push(slice)
+        if i == cores {
+            slices.push(arr.slice(i * chunk_size, arr.len()));
+        } else {
+            slices.push(arr.slice(i * chunk_size, chunk_size));
+        }
     }
     let r = slices
         .par_iter()
@@ -161,10 +171,10 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                         .expect("Did not find Float32 builder");
                     add_val!(avro_val, target, field, Double);
                 }
-                DataType::Timestamp(a, b) => {
+                DataType::Timestamp(a, _) => {
                     let _ = match a {
                         TimeUnit::Millisecond => {
-                             let target = builder
+                            let target = builder
                                 .field_builder::<TimestampMillisecondBuilder>(idx)
                                 .expect("expected TimestampMillisecond Builder");
                             add_val!(avro_val, target, field, TimestampMillis);
@@ -175,7 +185,7 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                                 .expect("expected TimestampMicrosecond Builder");
                             add_val!(avro_val, target, field, TimestampMicros);
                         }
-                        _ => unimplemented!()
+                        _ => unimplemented!(),
                     };
                 }
                 DataType::Date32 => {
@@ -184,7 +194,6 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                         .expect("expected Date32Builder");
                     add_val!(avro_val, target, field, Date);
                 }
-                DataType::Date64 => {}
                 DataType::Time32(_) => {}
                 DataType::Time64(_) => {}
                 DataType::Binary => {
@@ -247,7 +256,6 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
                     let val = get_val_from_possible_union(avro_val, field);
                     if let Value::Map(hm) = val {
                         hm.iter().for_each(|(k, v)| {
-                            // println!("{:?}", a);
                             add_data_to_array(
                                 &Value::String(k.clone()),
                                 target.keys(),
@@ -274,8 +282,6 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
                 .expect("expected boolean builder");
             add_val!(data, target, field, Boolean);
         }
-        // DataType::Int8 => {}
-        // DataType::Int16 => {}
         DataType::Int32 => {
             let target = builder
                 .as_any_mut()
@@ -290,11 +296,6 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
                 .expect("Did not find Int64 builder");
             add_val!(data, target, field, Long);
         }
-        // DataType::UInt8 => {}
-        // DataType::UInt16 => {}
-        // DataType::UInt32 => {}
-        // DataType::UInt64 => {}
-        // DataType::Float16 => {}
         DataType::Float32 => {
             let target = builder
                 .as_any_mut()
@@ -302,7 +303,6 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
                 .expect("Did not find Float32 builder");
             add_val!(data, target, field, Float);
         }
-        // DataType::Float64 => {}
         DataType::Timestamp(a, _) => {
             let _ = match a {
                 TimeUnit::Millisecond => {
@@ -319,7 +319,7 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
                         .expect("Did not find TimestampMicrosecond builder");
                     add_val!(data, target, field, TimestampMicros);
                 }
-                _ => unimplemented!()
+                _ => unimplemented!(),
             };
         }
         DataType::Date32 => {
@@ -327,16 +327,14 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
                 .as_any_mut()
                 .downcast_mut::<Date32Builder>()
                 .expect("Did not find Date32 builder");
-            // let target = builder
-            //     .field_builder::<Date32Builder>(idx)
-            //     .expect("expected Date32Builder");
             add_val!(data, target, field, Date);
         }
         // DataType::Date64 => {}
         // DataType::Time32(_) => {}
         // DataType::Time64(_) => {}
-        // DataType::Duration(_) => {}
-        // DataType::Interval(_) => {}
+        DataType::Duration(d) => {
+            unimplemented!()
+        }
         // DataType::Binary => {}
         DataType::Utf8 => {
             let ta = builder
@@ -373,11 +371,9 @@ fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &
 mod tests {
     use super::*;
     use crate::utils;
-    use arrow::array;
     use arrow::array::{
-        AsArray, Float32Array, Int32Array, Int64Array, MapArray, OffsetSizeTrait, StringArray,
+        Float32Array, Int32Array, Int64Array, MapArray, StringArray,
     };
-    use arrow::datatypes::DataType::{Float32, Int32};
     use std::collections::HashMap;
 
     #[test]
@@ -783,7 +779,7 @@ mod tests {
         let parsed_schema = parse_schema(s).unwrap();
         let avro_datum = "084a6f686e06446f653c041431323320456c6d20537412536f6d6577686572650a313233343514343536204f616b20537410416e7977686572650a36373839300002286a6f686e2e646f65406578616d706c652e636f6d";
         let encoded = utils::decode_hex(avro_datum);
-        let newv = vec![&encoded[..] ];
+        let newv = vec![&encoded[..]];
         let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
         // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -805,7 +801,7 @@ mod tests {
         let parsed_schema = parse_schema(s).unwrap();
         let avro_datum = "ccb502";
         let encoded = utils::decode_hex(avro_datum);
-        let newv = vec![&encoded[..] ];
+        let newv = vec![&encoded[..]];
         let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
         // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
