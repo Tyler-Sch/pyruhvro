@@ -18,7 +18,6 @@ use arrow::ipc::DurationBuilder;
 use rayon::prelude::*;
 
 // TODO: Figure out how to deal with actual unions
-// TODO: experiment with threads
 // TODO: enums
 // TODO: binary array
 // TODO: refactor full avro deserialization to lib.rs
@@ -104,8 +103,8 @@ pub fn per_datum_deserialize_arrow_multi(
     let cores = num_chunks;
     let chunk_size = arr.len() / cores;
     for i in 0..cores {
-        if i == cores {
-            slices.push(arr.slice(i * chunk_size, arr.len()));
+        if i == cores - 1 {
+            slices.push(arr.slice(i * chunk_size, arr.len()  - (i * chunk_size)));
         } else {
             slices.push(arr.slice(i * chunk_size, chunk_size));
         }

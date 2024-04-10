@@ -92,9 +92,54 @@ start_time = time.time()
 # arr = pa.array(data, pa.binary())
 # result = deserialize_arrow(arr, schema)
 ################################################################################
+# import pyarrow as pa
+# arr = pa.array(data, pa.binary())
+# result = deserialize_arrow_threaded(arr, schema, 12)
+################################################################################
+# threads fastavro
+# import fastavro
+# import json
+# from io import BytesIO
+# import concurrent.futures
+#
+# schema = fastavro.parse_schema(json.loads(schema))
+# def run_in_thread(data, worker_num):
+#     print(f"starting worker {worker_num}")
+#     result = [fastavro.schemaless_reader(BytesIO(i), schema) for i in data]
+#     return result
+#
+# with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+#     future1 = executor.submit(run_in_thread, data, "worker1")
+#     future2 = executor.submit(run_in_thread, data, "worker2")
+#
+#     result1 = future1.result()
+#     result2 = future2.result()
+#     print(len(result1))
+#     print(len(result2))
+
+################################################################################
+# threads ruhvro
+import concurrent.futures
 import pyarrow as pa
+import polars as pl
 arr = pa.array(data, pa.binary())
-result = deserialize_arrow_threaded(arr, schema, 8)
+def run_in_thread(data, worker_num):
+    print(f"starting worker {worker_num}")
+    result = deserialize_arrow_threaded(data, schema, 12)
+    return result
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    future1 = executor.submit(run_in_thread, arr, "worker1")
+    future2 = executor.submit(run_in_thread, arr, "worker2")
+
+    result1 = future1.result()
+    result2 = future2.result()
+    print(len(result1))
+    print(len(result2))
+    df = pl.from_arrow(result1)
+    print(df)
+
 ################################################################################
 # result = deserialize_datum(data, schema)
 # print(result)
