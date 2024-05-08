@@ -320,58 +320,78 @@ fn test_avro_to_arrow() {
 #[test]
 fn test_avro_to_arrow_complex() {
     // Example Avro schema
+
     let avro_schema_str = r#"
     {
-        "type": "record",
-        "name": "Person",
-        "fields": [
-            {
-                "name": "name",
-                "type": "string"
-            },
-            {
-                "name": "age",
-                "type": "int"
-            },
-            {
-                "type": "record",
-                "name": "Address",
-                "fields": [
-                    {
-                        "name": "street",
-                        "type": "string"
-                    },
-                    {
-                        "name": "city",
-                        "type": "string"
-                    },
-                    {
-                        "name": "country",
-                        "type": "string"
-                    }
-                ]
-            },
-            {
-                "name": "enumcol",
-                "type": "enum",
-                "symbols": ["a", "b", "c"]
-            },
-            {
-                "name": "mapcol",
-                "type": "map",
-                "values": "string",
-                "default": {}
-            },
-            {
-                "name": "unioncol",
-                "type": ["null", "string"]
-            }
-
-        ]
-    }
-
-
-        "#;
+    "type": "record",
+    "name": "Employee",
+    "namespace": "com.example",
+    "fields": [
+        {"name": "name", "type": "string"},
+        {"name": "age", "type": "int"},
+        {"name": "contactInfo", "type": [
+            "null",
+            {"type": "record", "name": "Contact", "fields": [
+                {"name": "email", "type": "string"},
+                {"name": "phone", "type": "string"}
+            ]},
+            "string"
+        ], "default": null}
+    ]
+}
+"#;
+    // let avro_schema_str = r#"
+    // {
+    //     "type": "record",
+    //     "name": "Person",
+    //     "fields": [
+    //         {
+    //             "name": "name",
+    //             "type": "string"
+    //         },
+    //         {
+    //             "name": "age",
+    //             "type": "int"
+    //         },
+    //         {
+    //             "type": "record",
+    //             "name": "Address",
+    //             "fields": [
+    //                 {
+    //                     "name": "street",
+    //                     "type": "string"
+    //                 },
+    //                 {
+    //                     "name": "city",
+    //                     "type": "string"
+    //                 },
+    //                 {
+    //                     "name": "country",
+    //                     "type": "string"
+    //                 }
+    //             ]
+    //         },
+    //         {
+    //             "name": "enumcol",
+    //             "type": "enum",
+    //             "symbols": ["a", "b", "c"]
+    //         },
+    //         {
+    //             "name": "mapcol",
+    //             "type": "map",
+    //             "values": "string",
+    //             "default": {}
+    //         },
+    //         {
+    //             "name": "unioncol",
+    //             "type": ["null", "string"]
+    //         }
+    //
+    //     ]
+    // }
+    //
+    //
+    //     "#;
 
     //     let avro_schema_str = r#"
     // {

@@ -38,7 +38,7 @@ macro_rules! add_val {
 }
 
 #[inline]
-fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Value {
+pub fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Value {
     let val;
     if field.is_nullable() {
         if let Value::Union(_, b) = value {
@@ -271,7 +271,7 @@ fn build_arrays_fields(data: &Vec<Value>, builder: &mut StructBuilder, fields: &
     builder.append(true);
 }
 
-fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &Field) -> () {
+pub fn add_data_to_array(data: &Value, builder: &mut Box<dyn ArrayBuilder>, field: &Field) -> () {
     let data = get_val_from_possible_union(data, field);
     match field.data_type() {
         DataType::Boolean => {
