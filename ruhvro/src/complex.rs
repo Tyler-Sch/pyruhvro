@@ -1,9 +1,12 @@
 use crate::deserialize::{add_data_to_array, get_val_from_possible_union};
-use anyhow::Result;
+use anyhow::{anyhow, Error, Result};
 use apache_avro::types::Value;
-use arrow::array::{Array, ArrayBuilder, ArrayRef, BooleanBufferBuilder, Datum, GenericListArray};
+use arrow::array::{
+    make_builder, Array, ArrayBuilder, ArrayRef, BooleanBufferBuilder, BooleanBuilder, Datum,
+    GenericListArray,
+};
 use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
-use arrow::datatypes::FieldRef;
+use arrow::datatypes::{DataType, FieldRef};
 use std::sync::Arc;
 
 enum AvroToArrowBuilder {
@@ -15,13 +18,33 @@ enum AvroToArrowBuilder {
 }
 
 impl AvroToArrowBuilder {
+    fn try_new(field: &FieldRef, capacity: usize) -> Result<Self> {
+        match field.data_type() {
+            DataType::List(inner) => {
+                let lc = ListContainer::try_new(field.clone(), capacity)?;
+                Ok(AvroToArrowBuilder::List(Box::new(lc)))
+            }
+            // DataType::Struct(_) => {}
+            // DataType::Union(_, _) => {}
+            // DataType::Map(_, _) => {}
+            _ => Ok(AvroToArrowBuilder::Primitive(make_builder(
+                field.data_type(),
+                capacity,
+            ))),
+        }
+    }
+
+    #[inline]
+    fn get_primitive(dt: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> {
+        make_builder(dt, capacity)
+    }
     fn add_val(&mut self, avro_val: &Value, field: &FieldRef) -> Result<()> {
         match self {
             AvroToArrowBuilder::Primitive(b) => {
                 add_data_to_array(avro_val, b, field); // TODO: Make this function only accept primitives (but what about strings)
             }
             AvroToArrowBuilder::List(list_container) => {
-                list_container.add_val(avro_val);
+                list_container.add_val(avro_val)?;
             }
             AvroToArrowBuilder::Struct(_) => {}
             AvroToArrowBuilder::Union(_) => {}
@@ -29,15 +52,13 @@ impl AvroToArrowBuilder {
         }
         Ok(())
     }
-    fn build(&mut self) -> Result<ArrayRef> {
+    fn build(mut self) -> Result<ArrayRef> {
         match self {
-            AvroToArrowBuilder::Primitive(builder) => {
+            AvroToArrowBuilder::Primitive(mut builder) => {
                 let a = builder.finish();
                 Ok(a)
             }
-            AvroToArrowBuilder::List(_) => {
-                unimplemented!()
-            }
+            AvroToArrowBuilder::List(list_container) => list_container.build(),
             AvroToArrowBuilder::Struct(_) => {
                 unimplemented!()
             }
@@ -59,6 +80,29 @@ struct ListContainer {
     nulls: BooleanBufferBuilder,
 }
 impl ListContainer {
+    fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
+        let fields = field.clone();
+        let inner_field = if let DataType::List(innerf) = field.data_type() {
+            Ok(innerf)
+        } else {
+            Err(anyhow!(
+                "could not extract inner builder from list {}",
+                field.name()
+            ))
+        }?;
+        let inner_builder = AvroToArrowBuilder::try_new(&inner_field, capacity)?;
+        let mut offsets = Vec::with_capacity(capacity + 1);
+        offsets.push(0);
+        let nulls = BooleanBufferBuilder::new(capacity);
+        Ok(ListContainer {
+            fields,
+            inner_field: inner_field.clone(),
+            inner_builder,
+            offsets,
+            nulls,
+        })
+    }
+
     fn add_val(&mut self, avro_val: &Value) -> Result<()> {
         let av = get_val_from_possible_union(avro_val, &self.fields);
 
@@ -88,7 +132,7 @@ impl ListContainer {
     }
 
     fn build(mut self) -> Result<ArrayRef> {
-        let inner_array = self.build_inner()?;
+        let inner_array = self.inner_builder.build()?;
         let sb = ScalarBuffer::from(self.offsets);
         let offsets = OffsetBuffer::new(sb);
         let nulls = NullBuffer::new(self.nulls.finish());
@@ -97,9 +141,9 @@ impl ListContainer {
         Ok(Arc::new(list_arr))
     }
 
-    fn build_inner(&mut self) -> Result<ArrayRef> {
-        self.inner_builder.build()
-    }
+    // fn build_inner(mut self) -> Result<ArrayRef> {
+    //     self.inner_builder.build()
+    // }
 }
 struct StructContainer {
     fields: FieldRef,
@@ -121,10 +165,11 @@ mod tests {
 
     #[test]
     fn test_simple_builder() {
-        let int_builder = Box::new(Int32Builder::new());
-        let mut avro_arrow_builder = AvroToArrowBuilder::Primitive(int_builder);
-        let avro_val = Value::Int(2);
+        // let int_builder = Box::new(Int32Builder::new());
         let field = Arc::new(Field::new("int_field", DataType::Int32, false));
+        // let mut avro_arrow_builder = AvroToArrowBuilder::Primitive(int_builder);
+        let mut avro_arrow_builder = AvroToArrowBuilder::try_new(&field, 2).unwrap();
+        let avro_val = Value::Int(2);
         let r = avro_arrow_builder.add_val(&avro_val, &field);
         let avro_val2 = Value::Int(3);
         let r = avro_arrow_builder.add_val(&avro_val2, &field);
@@ -200,5 +245,6 @@ mod tests {
                 .downcast_ref::<StringArray>()
                 .unwrap()
                 .value(0)
-        );}
+        );
+    }
 }
