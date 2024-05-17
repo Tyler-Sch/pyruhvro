@@ -418,9 +418,9 @@ fn test_avro_to_arrow_complex() {
     // }
     //     "#;
     let arrow_schema = read_avro_schmea_from_string(&avro_schema_str).unwrap();
-    for f in &arrow_schema.arrow_schema.fields {
-        println!("{:?}", f);
-    }
+    // for f in &arrow_schema.arrow_schema.fields {
+    //     println!("{:?}", f);
+    // }
 
-    // println!("{:#?}", arrow_schema.arrow_schema);
+    println!("{:#?}", arrow_schema.arrow_schema);
 }
