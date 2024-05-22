@@ -37,6 +37,11 @@ impl AvroToArrowBuilder {
                 let uc = UnionContainer::try_new(rewrapped, capacity)?;
                 Ok(AvroToArrowBuilder::Union(Box::new(uc)))
             }
+            DataType::Map(fr, ordered) => {
+                let rewrapped = Arc::new(Field::new(field.name(), DataType::Map(fr.clone(), ordered.clone()), field.is_nullable()));
+                let mc = MapContainer::try_new(rewrapped, capacity)?;
+                Ok(AvroToArrowBuilder::Map(Box::new(mc)))
+            }
             // DataType::Map(_, _) => {}
             _ => Ok(AvroToArrowBuilder::Primitive(make_builder(
                 field.data_type(),
@@ -63,7 +68,9 @@ impl AvroToArrowBuilder {
             AvroToArrowBuilder::Union(union_container) => {
                 union_container.add_val(avro_val)?;
             }
-            AvroToArrowBuilder::Map(_) => {}
+            AvroToArrowBuilder::Map(map_builder) => {
+                map_builder.add_val(avro_val)?;
+            }
         }
         Ok(())
     }
@@ -76,8 +83,8 @@ impl AvroToArrowBuilder {
             AvroToArrowBuilder::List(list_container) => list_container.build(),
             AvroToArrowBuilder::Struct(sb) => sb.build(),
             AvroToArrowBuilder::Union(ub) => ub.build(),
-            AvroToArrowBuilder::Map(_) => {
-                unimplemented!()
+            AvroToArrowBuilder::Map(mb) => {
+                mb.build()
             }
         }
     }
@@ -156,7 +163,7 @@ impl ListContainer {
     //     self.inner_builder.build()
     // }
 }
-struct StructContainer {
+pub struct StructContainer {
     fields: FieldRef,
     builders: Vec<(FieldRef, AvroToArrowBuilder)>,
     nulls: BooleanBufferBuilder,
@@ -169,7 +176,7 @@ impl StructContainer {
     // DataType::Struct(Fields::from(vec![f1.clone(), f2.clone()])),
     // false,
     // ));
-    fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
+    pub fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
         let mut builders = vec![];
         let _create_builders = if let DataType::Struct(flds) = field.clone().data_type() {
             for f in flds.iter() {
@@ -188,7 +195,21 @@ impl StructContainer {
         })
     }
 
-    fn add_val(&mut self, avro_val: &Value) -> Result<()> {
+    pub fn try_new_from_fields(fields: Fields, capacity: usize) -> Result<Self> {
+        let mut builders = vec![];
+        for f in fields.iter() {
+            let b = AvroToArrowBuilder::try_new(f, capacity)?;
+            builders.push((f.clone(), b));
+        }
+        let nulls = BooleanBufferBuilder::new(capacity);
+        Ok(StructContainer {
+            fields: Arc::new(Field::new("stuct_field", DataType::Struct(fields), false)),
+            builders,
+            nulls,
+        })
+    }
+
+    pub fn add_val(&mut self, avro_val: &Value) -> Result<()> {
         let av = get_val_from_possible_union(avro_val, &self.fields);
         match av {
             Value::Null => {
@@ -210,7 +231,7 @@ impl StructContainer {
         Ok(())
     }
 
-    fn build(mut self) -> Result<ArrayRef> {
+    pub fn build(mut self) -> Result<ArrayRef> {
         let mut fields = vec![];
         let a = self
             .builders
@@ -537,6 +558,7 @@ mod tests {
     }
     #[test]
     fn test_map_array() {
+        // todo add asserts
         let k_field = Field::new("key", DataType::Utf8, false);
         let v_field = Field::new("value", DataType::Int32, false);
         let struct_field = Arc::new(Field::new("struct_f", DataType::Struct(Fields::from(vec![k_field, v_field])), false));
@@ -590,5 +612,3 @@ mod tests {
         assert_eq!(a.columns().len(), 2);
     }
 }
-// InvalidArgumentError("MapArray expected ArrayData with DataType::Map \
-// got List(Field { name: \"struct_f\", data_type: Struct([Field { name: \"key\", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"value\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} })")

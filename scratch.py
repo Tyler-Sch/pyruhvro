@@ -7,10 +7,10 @@ import time
 # with open("/Users/tylerschauer/rust/ruhvro2/ruhvro/test_1mil.kafka", "r") as f:
 #     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
 #     data = [i for i in f.readlines()]
-# with open("/home/goser/rust/ruhvro2/test_20k.kafka", "r") as f:
-#     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
-with open("/home/goser/rust/ruhvro2/test_1mil.kafka", "r") as f:
+with open("/home/goser/rust/ruhvro2/test_20k.kafka", "r") as f:
     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
+# with open("/home/goser/rust/ruhvro2/test_1mil.kafka", "r") as f:
+#     data = [bytes.fromhex(i.strip()) for i in f.readlines()]
 
 schema = """{
   "type": "record",
@@ -85,16 +85,11 @@ start_time = time.time()
 ################################################################################
 # import pyarrow as pa
 # arr = pa.array(data, pa.binary())
-# result = deserialize_datum_from_arrow(arr, schema)
-# result = from_arrow(arr)
-################################################################################
-# import pyarrow as pa
-# arr = pa.array(data, pa.binary())
 # result = deserialize_arrow(arr, schema)
 ################################################################################
 # import pyarrow as pa
 # arr = pa.array(data, pa.binary())
-# result = deserialize_arrow_threaded(arr, schema, 12)
+# result = deserialize_arrow_threaded(arr, schema, 24)
 ################################################################################
 # threads fastavro
 # import fastavro
@@ -119,13 +114,38 @@ start_time = time.time()
 
 ################################################################################
 # threads ruhvro
+# import concurrent.futures
+# import pyarrow as pa
+# import polars as pl
+# arr = pa.array(data, pa.binary())
+# def run_in_thread(data, worker_num):
+#     print(f"starting worker {worker_num}")
+#     result = deserialize_arrow_threaded(data, schema, 12)
+#     return result
+#
+#
+# with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+#     future1 = executor.submit(run_in_thread, arr, "worker1")
+#     future2 = executor.submit(run_in_thread, arr, "worker2")
+#
+#     result1 = future1.result()
+#     result2 = future2.result()
+#     print(len(result1))
+#     print(len(result2))
+#     df = pl.from_arrow(result1)
+#     print(df)
+
+################################################################################
+
+# threads ruhvro not multithreaded
 import concurrent.futures
 import pyarrow as pa
 import polars as pl
 arr = pa.array(data, pa.binary())
 def run_in_thread(data, worker_num):
     print(f"starting worker {worker_num}")
-    result = deserialize_arrow_threaded(data, schema, 12)
+    result = deserialize_arrow(data, schema)
+    print(f"worker {worker_num} finished")
     return result
 
 
@@ -137,9 +157,8 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
     result2 = future2.result()
     print(len(result1))
     print(len(result2))
-    df = pl.from_arrow(result1)
+    df = pl.from_arrow([result1])
     print(df)
-
 ################################################################################
 # result = deserialize_datum(data, schema)
 # print(result)

@@ -65,6 +65,27 @@ impl std::fmt::Display for DeserialzeError {
     }
 }
 
+// pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> RecordBatch {
+//     let fields = to_arrow_schema(schema).unwrap().fields;
+//     let arr = data
+//         .as_any()
+//         .downcast_ref::<BinaryArray>()
+//         .ok_or_else(|| DeserialzeError)
+//         .unwrap();
+//     let mut builder = StructBuilder::from_fields(fields.clone(), data.len());
+//     arr.into_iter().for_each(|datum| {
+//         let mut sliced = &datum.unwrap()[..];
+//         let avro = from_avro_datum(schema, &mut sliced, None).unwrap();
+//         match avro {
+//             Value::Record(inner) => {
+//                 let a = inner.into_iter().map(|(_, y)| y).collect::<Vec<_>>();
+//                 build_arrays_fields(&a, &mut builder, &fields);
+//             }
+//             _ => unimplemented!(),
+//         }
+//     });
+//     builder.finish().into()
+// }
 pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> RecordBatch {
     let fields = to_arrow_schema(schema).unwrap().fields;
     let arr = data
@@ -72,19 +93,22 @@ pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> Recor
         .downcast_ref::<BinaryArray>()
         .ok_or_else(|| DeserialzeError)
         .unwrap();
-    let mut builder = StructBuilder::from_fields(fields.clone(), data.len());
+    // let mut builder = StructBuilder::from_fields(fields.clone(), data.len());
+    let mut builder = crate::complex::StructContainer::try_new_from_fields(fields, arr.len()).unwrap();
     arr.into_iter().for_each(|datum| {
         let mut sliced = &datum.unwrap()[..];
         let avro = from_avro_datum(schema, &mut sliced, None).unwrap();
-        match avro {
-            Value::Record(inner) => {
-                let a = inner.into_iter().map(|(_, y)| y).collect::<Vec<_>>();
-                build_arrays_fields(&a, &mut builder, &fields);
-            }
-            _ => unimplemented!(),
-        }
+        // match avro {
+        //     Value::Record(inner) => {
+        //         let a = inner.into_iter().map(|(_, y)| y).collect::<Vec<_>>();
+        //         build_arrays_fields(&a, &mut builder, &fields);
+        //     }
+        //     _ => unimplemented!(),
+        // }
+        let _ = builder.add_val(&avro);
     });
-    builder.finish().into()
+    let sa = builder.build().unwrap().as_any().downcast_ref::<StructArray>().unwrap().to_owned();
+    sa.into()
 }
 
 pub fn per_datum_deserialize_arrow_multi(
@@ -681,7 +705,7 @@ mod tests {
         let parsed_schema = parse_schema(s).unwrap();
         let avro_datum = "4834346437643065662d613264662d343833652d393261312d313532333830366164656334380a4c696e64610857617265022c6c696e646173636f7474406578616d706c652e6e6574062628323636293734302d31323737783031313432283030312d3935392d3839342d36353030783739392a3030312d3339362d3831392d363830307830303139000006044d72100866696e640e10617070726f6163680c00c0f691c7c35f";
         let encoded = utils::decode_hex(avro_datum);
-        // let decoded = per_datum_deserialize(&vec![encoded], &parsed_schema);
+        // let decoded = per_datum_deserialize_arrow(&vec![encoded], &parsed_schema);
         //
         // let expected = Value::Record(vec![
         //     (

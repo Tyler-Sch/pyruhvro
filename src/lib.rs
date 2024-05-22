@@ -3,18 +3,33 @@ use arrow::pyarrow::PyArrowType;
 use pyo3::prelude::*;
 use ruhvro::deserialize;
 
+// #[pyfunction]
+// fn deserialize_arrow(
+//     array: PyArrowType<ArrayData>,
+//     schema: &str,
+// ) -> PyResult<PyArrowType<RecordBatch>> {
+//     let parsed_schema = deserialize::parse_schema(schema).unwrap();
+//     let array = array.0;
+//     let array = make_array(array);
+//     let r = deserialize::per_datum_deserialize_arrow(array, &parsed_schema);
+//     Ok(PyArrowType(r))
+// }
+
 #[pyfunction]
 fn deserialize_arrow(
+    py: Python<'_>,
     array: PyArrowType<ArrayData>,
     schema: &str,
 ) -> PyResult<PyArrowType<RecordBatch>> {
-    let parsed_schema = deserialize::parse_schema(schema).unwrap();
-    let array = array.0;
-    let array = make_array(array);
-    let r = deserialize::per_datum_deserialize_arrow(array, &parsed_schema);
-    Ok(PyArrowType(r))
+    py.allow_threads(|| {
+        let parsed_schema = deserialize::parse_schema(schema).unwrap();
+        let array = array.0;
+        let array = make_array(array);
+        let r = deserialize::per_datum_deserialize_arrow(array, &parsed_schema);
+        Ok(PyArrowType(r))
+        }
+    )
 }
-
 #[pyfunction]
 fn deserialize_arrow_threaded(
     array: PyArrowType<ArrayData>,
