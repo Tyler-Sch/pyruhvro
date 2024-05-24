@@ -1,4 +1,4 @@
-use arrow::array::{make_array, Array, ArrayData, RecordBatch};
+use arrow::array::{make_array, ArrayData, RecordBatch};
 use arrow::pyarrow::PyArrowType;
 use pyo3::prelude::*;
 use ruhvro::deserialize;

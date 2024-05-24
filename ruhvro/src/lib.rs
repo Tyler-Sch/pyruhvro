@@ -2,7 +2,6 @@
 
 pub mod deserialize;
 mod schema_translate;
-mod utils;
 mod complex;
 
 #[cfg(test)]

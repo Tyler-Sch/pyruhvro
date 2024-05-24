@@ -11,18 +11,11 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct ArrowAvro {
+
     pub avro_schema: AvroSchema,
     pub arrow_schema: Schema,
 }
 
-pub fn read_avro_schmea_from_string(s: &str) -> Result<ArrowAvro> {
-    let w = AvroSchema::parse_str(s)?;
-    let arrow = to_arrow_schema(&w)?;
-    Ok(ArrowAvro {
-        avro_schema: w,
-        arrow_schema: arrow,
-    })
-}
 /// Converts an avro schema to an arrow schema
 pub fn to_arrow_schema(avro_schema: &AvroSchema) -> Result<Schema> {
     let mut schema_fields = vec![];
@@ -298,129 +291,4 @@ pub fn aliased(alias: &Alias, namespace: Option<&str>, default_namespace: Option
     }
 }
 
-#[test]
-fn test_avro_to_arrow() {
-    // Example Avro schema
-    let avro_schema_str = r#"
-        {
-            "type": "record",
-            "name": "example_schema",
-            "fields": [
-                {"name": "field1", "type": "int"},
-                {"name": "field2", "type": "string"},
-                {"name": "field3", "type": ["null", "long"]}
-            ]
-        }
-    "#;
-    let arrow_schema = read_avro_schmea_from_string(&avro_schema_str).unwrap();
 
-    println!("{:#?}", arrow_schema.arrow_schema);
-}
-
-#[test]
-fn test_avro_to_arrow_complex() {
-    // Example Avro schema
-
-    let avro_schema_str = r#"
-    {
-    "type": "record",
-    "name": "Employee",
-    "namespace": "com.example",
-    "fields": [
-        {"name": "name", "type": "string"},
-        {"name": "age", "type": "int"},
-        {"name": "contactInfo", "type": [
-            "null",
-            {"type": "record", "name": "Contact", "fields": [
-                {"name": "email", "type": "string"},
-                {"name": "phone", "type": "string"}
-            ]},
-            "string"
-        ], "default": null}
-    ]
-}
-"#;
-    // let avro_schema_str = r#"
-    // {
-    //     "type": "record",
-    //     "name": "Person",
-    //     "fields": [
-    //         {
-    //             "name": "name",
-    //             "type": "string"
-    //         },
-    //         {
-    //             "name": "age",
-    //             "type": "int"
-    //         },
-    //         {
-    //             "type": "record",
-    //             "name": "Address",
-    //             "fields": [
-    //                 {
-    //                     "name": "street",
-    //                     "type": "string"
-    //                 },
-    //                 {
-    //                     "name": "city",
-    //                     "type": "string"
-    //                 },
-    //                 {
-    //                     "name": "country",
-    //                     "type": "string"
-    //                 }
-    //             ]
-    //         },
-    //         {
-    //             "name": "enumcol",
-    //             "type": "enum",
-    //             "symbols": ["a", "b", "c"]
-    //         },
-    //         {
-    //             "name": "mapcol",
-    //             "type": "map",
-    //             "values": "string",
-    //             "default": {}
-    //         },
-    //         {
-    //             "name": "unioncol",
-    //             "type": ["null", "string"]
-    //         }
-    //
-    //     ]
-    // }
-    //
-    //
-    //     "#;
-
-    //     let avro_schema_str = r#"
-    // {
-    //     "type": "record",
-    //     "name": "Employee",
-    //     "fields": [
-    //         {
-    //             "name": "id",
-    //             "type": "int"
-    //         },
-    //         {
-    //             "name": "name",
-    //             "type": "string"
-    //         },
-    //         {
-    //             "name": "age",
-    //             "type": "int"
-    //         },
-    //         {
-    //             "name": "department",
-    //             "type": "string"
-    //         }
-    //     ]
-    // }
-    //     "#;
-    let arrow_schema = read_avro_schmea_from_string(&avro_schema_str).unwrap();
-    // for f in &arrow_schema.arrow_schema.fields {
-    //     println!("{:?}", f);
-    // }
-
-    println!("{:#?}", arrow_schema.arrow_schema);
-}

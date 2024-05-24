@@ -1,13 +1,28 @@
-use crate::deserialize::{add_data_to_array, get_val_from_possible_union};
 use anyhow::{anyhow, Result};
 use apache_avro::types::Value;
-use arrow::array::{make_builder, Array, ArrayBuilder, ArrayRef, BooleanBufferBuilder, BooleanBuilder, Datum, GenericListArray, StructArray, UnionArray, MapArray, ArrayData, ListArray, AsArray};
+use arrow::array::{
+    make_builder, Array, ArrayBuilder, ArrayRef, BooleanBufferBuilder, BooleanBuilder,
+    Date32Builder, Float32Builder, GenericListArray, Int32Builder, Int64Builder, ListArray,
+    MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
+    UnionArray,
+};
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-use arrow::datatypes::{DataType, Field, FieldRef, Fields, UnionFields, UnionMode};
-use std::any::Any;
+use arrow::datatypes::{DataType, Field, FieldRef, Fields, TimeUnit};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+macro_rules! add_val {
+    ($val:expr,$target:ident,$field: expr, $($type:ident),*) => {{
+        let val = get_val_from_possible_union($val, $field);
+        $(
+        if let &Value::$type(d) = val {
+           $target.append_value(d);
+        } )*
+        else {
+            $target.append_null()
+        }
+    }}
+}
 enum AvroToArrowBuilder {
     Primitive(Box<dyn ArrayBuilder>),
     List(Box<ListContainer>),
@@ -19,27 +34,20 @@ enum AvroToArrowBuilder {
 impl AvroToArrowBuilder {
     fn try_new(field: &FieldRef, capacity: usize) -> Result<Self> {
         match field.data_type() {
-            DataType::List(inner) => {
+            DataType::List(_inner) => {
                 let lc = ListContainer::try_new(field.clone(), capacity)?;
                 Ok(AvroToArrowBuilder::List(Box::new(lc)))
             }
-            DataType::Struct(flds) => {
-                let rewrapped = Arc::new(Field::new(
-                    field.name(),
-                    DataType::Struct(flds.clone()),
-                    field.is_nullable(),
-                ));
-                let sc = StructContainer::try_new(rewrapped, capacity)?;
+            DataType::Struct(_flds) => {
+                let sc = StructContainer::try_new(field.clone(), capacity)?;
                 Ok(AvroToArrowBuilder::Struct(Box::new(sc)))
             }
-            DataType::Union(union_fields, union_type) => {
-                let rewrapped = Arc::new(Field::new(field.name(), DataType::Union(union_fields.clone(), union_type.clone()), field.is_nullable()));
-                let uc = UnionContainer::try_new(rewrapped, capacity)?;
+            DataType::Union(_union_fields, _union_type) => {
+                let uc = UnionContainer::try_new(field.clone(), capacity)?;
                 Ok(AvroToArrowBuilder::Union(Box::new(uc)))
             }
-            DataType::Map(fr, ordered) => {
-                let rewrapped = Arc::new(Field::new(field.name(), DataType::Map(fr.clone(), ordered.clone()), field.is_nullable()));
-                let mc = MapContainer::try_new(rewrapped, capacity)?;
+            DataType::Map(_fr, _ordered) => {
+                let mc = MapContainer::try_new(field.clone(), capacity)?;
                 Ok(AvroToArrowBuilder::Map(Box::new(mc)))
             }
             // DataType::Map(_, _) => {}
@@ -50,14 +58,10 @@ impl AvroToArrowBuilder {
         }
     }
 
-    #[inline]
-    fn get_primitive(dt: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> {
-        make_builder(dt, capacity)
-    }
     fn add_val(&mut self, avro_val: &Value, field: &FieldRef) -> Result<()> {
         match self {
             AvroToArrowBuilder::Primitive(b) => {
-                add_data_to_array(avro_val, b, field);
+                add_data_to_array_builder(avro_val, b, field);
             }
             AvroToArrowBuilder::List(list_container) => {
                 list_container.add_val(avro_val)?;
@@ -74,7 +78,7 @@ impl AvroToArrowBuilder {
         }
         Ok(())
     }
-    fn build(mut self) -> Result<ArrayRef> {
+    fn build(self) -> Result<ArrayRef> {
         match self {
             AvroToArrowBuilder::Primitive(mut builder) => {
                 let a = builder.finish();
@@ -83,9 +87,7 @@ impl AvroToArrowBuilder {
             AvroToArrowBuilder::List(list_container) => list_container.build(),
             AvroToArrowBuilder::Struct(sb) => sb.build(),
             AvroToArrowBuilder::Union(ub) => ub.build(),
-            AvroToArrowBuilder::Map(mb) => {
-                mb.build()
-            }
+            AvroToArrowBuilder::Map(mb) => mb.build(),
         }
     }
 }
@@ -158,10 +160,6 @@ impl ListContainer {
             GenericListArray::try_new(self.inner_field.clone(), offsets, inner_array, Some(nulls))?;
         Ok(Arc::new(list_arr))
     }
-
-    // fn build_inner(mut self) -> Result<ArrayRef> {
-    //     self.inner_builder.build()
-    // }
 }
 pub struct StructContainer {
     fields: FieldRef,
@@ -221,7 +219,7 @@ impl StructContainer {
             }
             Value::Record(inner_vals) => {
                 for (idx, (_field_name, v)) in inner_vals.iter().enumerate() {
-                    let mut builder = &mut self.builders[idx];
+                    let builder = &mut self.builders[idx];
                     let _ = builder.1.add_val(v, &builder.0)?;
                 }
                 self.nulls.append(true);
@@ -249,7 +247,6 @@ impl StructContainer {
     }
 }
 struct UnionContainer {
-    field: FieldRef,
     type_ids: Vec<i8>,
     // type_id_vec contains the index for the array vec
     type_id_vec: Vec<i8>,
@@ -278,7 +275,6 @@ impl UnionContainer {
                 Err(anyhow!("error creating nested builders in Union"))
             }?;
         Ok(UnionContainer {
-            field,
             type_ids,
             type_id_vec: vec![],
             value_offsets_buffer: vec![],
@@ -287,12 +283,11 @@ impl UnionContainer {
         })
     }
 
-
     ///
     /// Adds value to Union. Union needs to track additional meta data
     fn add_val(&mut self, avro_val: &Value) -> Result<()> {
         if let Value::Union(field_idx, val) = avro_val {
-            let mut builder = &mut self.builders[*field_idx as usize];
+            let builder = &mut self.builders[*field_idx as usize];
             let type_idx = *field_idx as i8;
             builder.1.add_val(val, &builder.0)?;
 
@@ -305,7 +300,7 @@ impl UnionContainer {
         }
         Ok(())
     }
-    fn build(mut self) -> Result<ArrayRef> {
+    fn build(self) -> Result<ArrayRef> {
         let type_id_buffer = Buffer::from_vec(self.type_id_vec);
         let value_offsets_buffer = Buffer::from_vec(self.value_offsets_buffer);
         let children = self
@@ -341,14 +336,21 @@ struct MapContainer {
 
 impl MapContainer {
     fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
-        match field.data_type()  {
+        match field.data_type() {
             DataType::Map(fr, _ordered) => {
-                let wrapped  = Arc::new(Field::new("map_col", DataType::List(fr.clone()), field.is_nullable()));
+                let wrapped = Arc::new(Field::new(
+                    "map_col",
+                    DataType::List(fr.clone()),
+                    field.is_nullable(),
+                ));
                 let il = ListContainer::try_new(wrapped, capacity)?;
-                let mc = MapContainer {fields: field.clone(), inner_list: il};
+                let mc = MapContainer {
+                    fields: field.clone(),
+                    inner_list: il,
+                };
                 Ok(mc)
             }
-            _ => Err(anyhow!("Failed to create MapContainer"))
+            _ => Err(anyhow!("Failed to create MapContainer")),
         }
     }
     fn add_val(&mut self, avro_val: &Value) -> Result<()> {
@@ -356,48 +358,154 @@ impl MapContainer {
         match av {
             Value::Map(hm) => {
                 let mut inside_vec = vec![];
-                for (k,v) in hm.iter() {
-                    let rewrapped = Value::Record(vec![("key".to_string(), Value::String(k.to_owned())), ("value".to_string(), v.to_owned())]);
+                for (k, v) in hm.iter() {
+                    let rewrapped = Value::Record(vec![
+                        ("key".to_string(), Value::String(k.to_owned())),
+                        ("value".to_string(), v.to_owned()),
+                    ]);
                     inside_vec.push(rewrapped)
                 }
                 let wrapped_list = Value::Array(inside_vec);
                 self.inner_list.add_val(&wrapped_list)?;
             }
             Value::Null => unimplemented!(),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
         Ok(())
     }
-    fn build(mut self) -> Result<ArrayRef> {
+    fn build(self) -> Result<ArrayRef> {
         let l_array = self.inner_list.build()?;
-        let list_arr = l_array.as_any().downcast_ref::<ListArray>().unwrap().to_owned();
+        let list_arr = l_array
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .to_owned();
         let (a, b, c, d) = list_arr.into_parts();
-        let m = MapArray::try_new(a, b, c.as_any().downcast_ref::<StructArray>().unwrap().to_owned(), d, false)?;
+        let m = MapArray::try_new(
+            a,
+            b,
+            c.as_any().downcast_ref::<StructArray>().unwrap().to_owned(),
+            d,
+            false,
+        )?;
         Ok(Arc::new(m))
     }
 }
 
+#[inline]
+fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Value {
+    let val;
+    if field.is_nullable() {
+        if let Value::Union(_, b) = value {
+            val = b.as_ref();
+        } else {
+            val = value;
+        }
+    } else {
+        val = value;
+    }
+    val
+}
+
+pub fn add_data_to_array_builder(
+    data: &Value,
+    builder: &mut Box<dyn ArrayBuilder>,
+    field: &Field,
+) -> () {
+    let data = get_val_from_possible_union(data, field);
+    match field.data_type() {
+        DataType::Boolean => {
+            let target = builder
+                .as_any_mut()
+                .downcast_mut::<BooleanBuilder>()
+                .expect("expected boolean builder");
+            add_val!(data, target, field, Boolean);
+        }
+        DataType::Int32 => {
+            let target = builder
+                .as_any_mut()
+                .downcast_mut::<Int32Builder>()
+                .expect("Did not find Int builder");
+            add_val!(data, target, field, Int);
+        }
+        DataType::Int64 => {
+            let target = builder
+                .as_any_mut()
+                .downcast_mut::<Int64Builder>()
+                .expect("Did not find Int64 builder");
+            add_val!(data, target, field, Long);
+        }
+        DataType::Float32 => {
+            let target = builder
+                .as_any_mut()
+                .downcast_mut::<Float32Builder>()
+                .expect("Did not find Float32 builder");
+            add_val!(data, target, field, Float);
+        }
+        DataType::Timestamp(a, _) => {
+            let _ = match a {
+                TimeUnit::Millisecond => {
+                    let target = builder
+                        .as_any_mut()
+                        .downcast_mut::<TimestampMillisecondBuilder>()
+                        .expect("Did not find TimestampMillisecond builder");
+                    add_val!(data, target, field, TimestampMillis);
+                }
+                TimeUnit::Microsecond => {
+                    let target = builder
+                        .as_any_mut()
+                        .downcast_mut::<TimestampMicrosecondBuilder>()
+                        .expect("Did not find TimestampMicrosecond builder");
+                    add_val!(data, target, field, TimestampMicros);
+                }
+                _ => unimplemented!(),
+            };
+        }
+        DataType::Date32 => {
+            let target = builder
+                .as_any_mut()
+                .downcast_mut::<Date32Builder>()
+                .expect("Did not find Date32 builder");
+            add_val!(data, target, field, Date);
+        }
+        DataType::Duration(_) => {
+            unimplemented!()
+        }
+        DataType::Utf8 => {
+            let ta = builder
+                .as_any_mut()
+                .downcast_mut::<StringBuilder>()
+                .expect("Did not find StringBuilder");
+            if let Value::String(s) = data {
+                ta.append_value(s.clone());
+            } else {
+                ta.append_null();
+            }
+        }
+        _ => unimplemented!(),
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use crate::complex::{AvroToArrowBuilder, ListContainer, MapContainer, StructContainer, UnionContainer};
+    use super::*;
     use apache_avro::types::Value;
     use arrow::array::{
-        Array, BooleanBufferBuilder, Int32Array, ListArray, StringArray, StringBuilder,
-        StructArray, UnionArray, RecordBatch
+        Array, ArrayBuilder, BooleanBufferBuilder, Int32Array, Int32Builder, ListArray,
+        RecordBatch, StringArray, StringBuilder, StructArray, UnionArray,
     };
     use arrow::datatypes::{DataType, Field, Fields, UnionFields, UnionMode};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
     fn test_simple_builder() {
-        // let int_builder = Box::new(Int32Builder::new());
         let field = Arc::new(Field::new("int_field", DataType::Int32, false));
-        // let mut avro_arrow_builder = AvroToArrowBuilder::Primitive(int_builder);
         let mut avro_arrow_builder = AvroToArrowBuilder::try_new(&field, 2).unwrap();
         let avro_val = Value::Int(2);
-        let _r = avro_arrow_builder.add_val(&avro_val, &field);
+        let _ = avro_arrow_builder.add_val(&avro_val, &field);
         let avro_val2 = Value::Int(3);
-        let r = avro_arrow_builder.add_val(&avro_val2, &field);
+        let _ = avro_arrow_builder.add_val(&avro_val2, &field);
         let result = avro_arrow_builder
             .build()
             .unwrap()
@@ -561,18 +669,22 @@ mod tests {
         // todo add asserts
         let k_field = Field::new("key", DataType::Utf8, false);
         let v_field = Field::new("value", DataType::Int32, false);
-        let struct_field = Arc::new(Field::new("struct_f", DataType::Struct(Fields::from(vec![k_field, v_field])), false));
-        let map_field = Field::new("map_f", DataType::Map(struct_field.clone(), false),false);
+        let struct_field = Arc::new(Field::new(
+            "struct_f",
+            DataType::Struct(Fields::from(vec![k_field, v_field])),
+            false,
+        ));
+        let map_field = Field::new("map_f", DataType::Map(struct_field.clone(), false), false);
         let mut mc = MapContainer::try_new(Arc::new(map_field), 5).unwrap();
 
-        let avro_val = Value::Map(HashMap::from_iter(vec![("my_key".into(), Value::Int(1)), ("second".into(), Value::Int(3))]));
+        let avro_val = Value::Map(HashMap::from_iter(vec![
+            ("my_key".into(), Value::Int(1)),
+            ("second".into(), Value::Int(3)),
+        ]));
         let r = mc.add_val(&avro_val);
         println!("{:?}", r);
         let result = mc.build().unwrap();
         println!("{:?}", result);
-
-
-
     }
     #[test]
     fn test_nested_struct() {
@@ -580,9 +692,24 @@ mod tests {
         let list_field = Field::new("list_f", DataType::List(list_val_field), false);
         let inside_nested_struct_int = Field::new("in_struct_int", DataType::Int32, false);
         let inside_nested_struct_long = Field::new("in_struct_long", DataType::Int64, false);
-        let inside_struct_field = Field::new("inside_struct", DataType::Struct(Fields::from(vec![inside_nested_struct_int, inside_nested_struct_long])), false);
-        let list_of_structs = Field::new("list_of_structs", DataType::List(Arc::new(inside_struct_field)), false);
-        let outer_struct = Arc::new(Field::new("outer_struct", DataType::Struct(Fields::from(vec![list_field, list_of_structs])), false));
+        let inside_struct_field = Field::new(
+            "inside_struct",
+            DataType::Struct(Fields::from(vec![
+                inside_nested_struct_int,
+                inside_nested_struct_long,
+            ])),
+            false,
+        );
+        let list_of_structs = Field::new(
+            "list_of_structs",
+            DataType::List(Arc::new(inside_struct_field)),
+            false,
+        );
+        let outer_struct = Arc::new(Field::new(
+            "outer_struct",
+            DataType::Struct(Fields::from(vec![list_field, list_of_structs])),
+            false,
+        ));
 
         let mut sb = StructContainer::try_new(outer_struct, 1).unwrap();
 
@@ -590,25 +717,68 @@ mod tests {
         let avro_list_val2 = Value::Int(2);
         let avro_list = Value::Array(vec![avro_list_val, avro_list_val2]);
         let avro_inside_nested_struct_int = Value::Int(2);
-        let avro_inside_nested_struct_long =  Value::Long(3);
-        let avro_struct = Value::Record(vec![("in_struct_int".to_string(), avro_inside_nested_struct_int), ("in_struct_long".to_string(), avro_inside_nested_struct_long)]);
+        let avro_inside_nested_struct_long = Value::Long(3);
+        let avro_struct = Value::Record(vec![
+            ("in_struct_int".to_string(), avro_inside_nested_struct_int),
+            ("in_struct_long".to_string(), avro_inside_nested_struct_long),
+        ]);
         let avro_list_struct = Value::Array(vec![avro_struct]);
-        let avro_outer_struct = Value::Record(vec![("list_f".to_string(), avro_list), ("outer_struct".into(), avro_list_struct)]);
+        let avro_outer_struct = Value::Record(vec![
+            ("list_f".to_string(), avro_list),
+            ("outer_struct".into(), avro_list_struct),
+        ]);
 
         let _r = sb.add_val(&avro_outer_struct);
         // println!("{:?}", _r);
         let avro_list_val = Value::Int(2);
         let avro_list = Value::Array(vec![avro_list_val]);
         let avro_inside_nested_struct_int = Value::Int(3);
-        let avro_inside_nested_struct_long =  Value::Long(4);
-        let avro_struct = Value::Record(vec![("in_struct_int".to_string(), avro_inside_nested_struct_int), ("in_struct_long".to_string(), avro_inside_nested_struct_long)]);
+        let avro_inside_nested_struct_long = Value::Long(4);
+        let avro_struct = Value::Record(vec![
+            ("in_struct_int".to_string(), avro_inside_nested_struct_int),
+            ("in_struct_long".to_string(), avro_inside_nested_struct_long),
+        ]);
         let avro_list_struct = Value::Array(vec![avro_struct]);
-        let avro_outer_struct = Value::Record(vec![("list_f".to_string(), avro_list), ("outer_struct".into(), avro_list_struct)]);
-        sb.add_val(&avro_outer_struct);
+        let avro_outer_struct = Value::Record(vec![
+            ("list_f".to_string(), avro_list),
+            ("outer_struct".into(), avro_list_struct),
+        ]);
+        let _ = sb.add_val(&avro_outer_struct);
+
 
         let finished = sb.build();
-        let a: RecordBatch = finished.unwrap().as_any().downcast_ref::<StructArray>().unwrap().into();
+        let a: RecordBatch = finished
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .into();
         assert_eq!(a.num_rows(), 2);
         assert_eq!(a.columns().len(), 2);
+    }
+
+    #[test]
+    fn test_add_add_data_to_array_null() {
+        let f1 = Field::new("nullints", DataType::Int32, true);
+        let f2 = Field::new("nullstring", DataType::Utf8, true);
+
+        let mut b1: Box<dyn ArrayBuilder> = Box::new(Int32Builder::new());
+        let avro_int_1 = Value::Union(1, Box::new(Value::Int(2)));
+        let avro_int_2 = Value::Union(0, Box::new(Value::Null));
+        add_data_to_array_builder(&avro_int_1, &mut b1, &f1);
+        add_data_to_array_builder(&avro_int_2, &mut b1, &f1);
+        let result_int = b1.finish();
+        let expected_int: Box<dyn Array> = Box::new(Int32Array::from(vec![Some(2), None]));
+        assert_eq!(result_int, expected_int.into());
+
+        let mut b2: Box<dyn ArrayBuilder> = Box::new(StringBuilder::new());
+        let avro_string_1 = Value::Union(1, Box::new(Value::String("hello".into())));
+        let avro_string_2 = Value::Union(0, Box::new(Value::Null));
+        add_data_to_array_builder(&avro_string_1, &mut b2, &f2);
+        add_data_to_array_builder(&avro_string_2, &mut b2, &f2);
+        let result_str = b2.finish();
+        let expected_str: Box<dyn Array> =
+            Box::new(StringArray::from(vec![Some("hello".to_string()), None]));
+        assert_eq!(result_str, expected_str.into());
     }
 }
