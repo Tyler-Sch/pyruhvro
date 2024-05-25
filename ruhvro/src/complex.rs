@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
 use apache_avro::types::Value;
 use arrow::array::{
-    make_builder, Array, ArrayBuilder, ArrayRef, BooleanBufferBuilder, BooleanBuilder,
-    Date32Builder, Float32Builder, GenericListArray, Int32Builder, Int64Builder, ListArray,
-    MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
-    UnionArray,
+    make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder,
+    Date32Builder, Float32Builder, GenericListArray, Int32Builder,
+    Int64Builder, MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder,
+    TimestampMillisecondBuilder, UnionArray,
 };
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, TimeUnit};
@@ -245,6 +245,12 @@ impl StructContainer {
         let s_arr = Arc::new(StructArray::try_new(Fields::from(fields), a, Some(nulls))?);
         Ok(s_arr)
     }
+
+    pub fn try_build_struct_array(self) -> Result<StructArray> {
+        let built = self.build()?;
+        let typed = built.as_struct().to_owned();
+        Ok(typed)
+    }
 }
 struct UnionContainer {
     type_ids: Vec<i8>,
@@ -375,21 +381,80 @@ impl MapContainer {
     }
     fn build(self) -> Result<ArrayRef> {
         let l_array = self.inner_list.build()?;
-        let list_arr = l_array
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap()
-            .to_owned();
-        let (a, b, c, d) = list_arr.into_parts();
+        let list_arr = l_array.as_list().to_owned();
+        let (field_ref, offsets, data, null_buffer) = list_arr.into_parts();
         let m = MapArray::try_new(
-            a,
-            b,
-            c.as_any().downcast_ref::<StructArray>().unwrap().to_owned(),
-            d,
+            field_ref,
+            offsets,
+            data.as_struct().to_owned(),
+            null_buffer,
             false,
         )?;
         Ok(Arc::new(m))
     }
+}
+
+
+pub fn add_data_to_array_builder(
+    data: &Value,
+    builder: &mut Box<dyn ArrayBuilder>,
+    field: &Field,
+) -> () {
+    let data = get_val_from_possible_union(data, field);
+    match field.data_type() {
+        DataType::Boolean => {
+            let target = get_typed_array::<BooleanBuilder>(builder);
+            add_val!(data, target, field, Boolean);
+        }
+        DataType::Int32 => {
+            let target = get_typed_array::<Int32Builder>(builder);
+            add_val!(data, target, field, Int);
+        }
+        DataType::Int64 => {
+            let target = get_typed_array::<Int64Builder>(builder);
+            add_val!(data, target, field, Long);
+        }
+        DataType::Float32 => {
+            let target = get_typed_array::<Float32Builder>(builder);
+            add_val!(data, target, field, Float);
+        }
+        DataType::Timestamp(a, _) => {
+            let _ = match a {
+                TimeUnit::Millisecond => {
+                    let target = get_typed_array::<TimestampMillisecondBuilder>(builder);
+                    add_val!(data, target, field, TimestampMillis);
+                }
+                TimeUnit::Microsecond => {
+                    let target = get_typed_array::<TimestampMicrosecondBuilder>(builder);
+                    add_val!(data, target, field, TimestampMicros);
+                }
+                _ => unimplemented!(),
+            };
+        }
+        DataType::Date32 => {
+            let target = get_typed_array::<Date32Builder>(builder);
+            add_val!(data, target, field, Date);
+        }
+        DataType::Duration(_) => {
+            unimplemented!()
+        }
+        DataType::Utf8 => {
+            let ta = get_typed_array::<StringBuilder>(builder);
+            if let Value::String(s) = data {
+                ta.append_value(s.clone());
+            } else {
+                ta.append_null();
+            }
+        }
+        _ => unimplemented!(),
+    }
+}
+
+#[inline]
+fn get_typed_array<'a, T: ArrayBuilder>(arr: &'a mut Box<dyn ArrayBuilder>) -> &mut T {
+    arr.as_any_mut()
+        .downcast_mut::<T>()
+        .expect("Did not find expected builder")
 }
 
 #[inline]
@@ -405,85 +470,6 @@ fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Va
         val = value;
     }
     val
-}
-
-pub fn add_data_to_array_builder(
-    data: &Value,
-    builder: &mut Box<dyn ArrayBuilder>,
-    field: &Field,
-) -> () {
-    let data = get_val_from_possible_union(data, field);
-    match field.data_type() {
-        DataType::Boolean => {
-            let target = builder
-                .as_any_mut()
-                .downcast_mut::<BooleanBuilder>()
-                .expect("expected boolean builder");
-            add_val!(data, target, field, Boolean);
-        }
-        DataType::Int32 => {
-            let target = builder
-                .as_any_mut()
-                .downcast_mut::<Int32Builder>()
-                .expect("Did not find Int builder");
-            add_val!(data, target, field, Int);
-        }
-        DataType::Int64 => {
-            let target = builder
-                .as_any_mut()
-                .downcast_mut::<Int64Builder>()
-                .expect("Did not find Int64 builder");
-            add_val!(data, target, field, Long);
-        }
-        DataType::Float32 => {
-            let target = builder
-                .as_any_mut()
-                .downcast_mut::<Float32Builder>()
-                .expect("Did not find Float32 builder");
-            add_val!(data, target, field, Float);
-        }
-        DataType::Timestamp(a, _) => {
-            let _ = match a {
-                TimeUnit::Millisecond => {
-                    let target = builder
-                        .as_any_mut()
-                        .downcast_mut::<TimestampMillisecondBuilder>()
-                        .expect("Did not find TimestampMillisecond builder");
-                    add_val!(data, target, field, TimestampMillis);
-                }
-                TimeUnit::Microsecond => {
-                    let target = builder
-                        .as_any_mut()
-                        .downcast_mut::<TimestampMicrosecondBuilder>()
-                        .expect("Did not find TimestampMicrosecond builder");
-                    add_val!(data, target, field, TimestampMicros);
-                }
-                _ => unimplemented!(),
-            };
-        }
-        DataType::Date32 => {
-            let target = builder
-                .as_any_mut()
-                .downcast_mut::<Date32Builder>()
-                .expect("Did not find Date32 builder");
-            add_val!(data, target, field, Date);
-        }
-        DataType::Duration(_) => {
-            unimplemented!()
-        }
-        DataType::Utf8 => {
-            let ta = builder
-                .as_any_mut()
-                .downcast_mut::<StringBuilder>()
-                .expect("Did not find StringBuilder");
-            if let Value::String(s) = data {
-                ta.append_value(s.clone());
-            } else {
-                ta.append_null();
-            }
-        }
-        _ => unimplemented!(),
-    }
 }
 
 #[cfg(test)]
@@ -604,9 +590,7 @@ mod tests {
         let result = s.build().unwrap();
         let a = result
             .clone()
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap()
+            .as_struct()
             .column(0)
             .as_any()
             .downcast_ref::<Int32Array>()
@@ -614,10 +598,7 @@ mod tests {
             .value(0);
         assert_eq!(a, 1);
         let b = result
-            .clone()
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap()
+            .clone().as_struct()
             .column(1)
             .as_any()
             .downcast_ref::<StringArray>()
@@ -744,7 +725,6 @@ mod tests {
             ("outer_struct".into(), avro_list_struct),
         ]);
         let _ = sb.add_val(&avro_outer_struct);
-
 
         let finished = sb.build();
         let a: RecordBatch = finished

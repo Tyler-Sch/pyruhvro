@@ -2,11 +2,10 @@ use crate::schema_translate::to_arrow_schema;
 use std::sync::Arc;
 use crate::complex::StructContainer;
 
-use anyhow::anyhow;
 use anyhow::Result;
 use apache_avro::from_avro_datum;
 use apache_avro::Schema as AvroSchema;
-use arrow::array::{Array, ArrayRef, BinaryArray, RecordBatch, StructArray};
+use arrow::array::{Array, BinaryArray, RecordBatch};
 use rayon::prelude::*;
 // TODO: enums
 // TODO: binary array
@@ -17,43 +16,27 @@ pub fn parse_schema(schema_string: &str) -> Result<AvroSchema> {
     Ok(AvroSchema::parse_str(schema_string)?)
 }
 
-
-pub fn per_datum_deserialize_arrow(data: ArrayRef, schema: &AvroSchema) -> RecordBatch {
+pub fn per_datum_deserialize(data: &Vec<&[u8]>, schema: &AvroSchema) -> RecordBatch {
     let fields = to_arrow_schema(schema).unwrap().fields;
-    let arr = data
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .ok_or_else(|| anyhow!("Error downcasting input array to arrow BinaryArray"))
-        .unwrap();
     let mut builder =
-        StructContainer::try_new_from_fields(fields, arr.len()).unwrap();
-    arr.into_iter().for_each(|datum| {
-        let mut sliced = &datum.unwrap()[..];
+        StructContainer::try_new_from_fields(fields, data.len()).unwrap();
+    data.into_iter().for_each(|datum| {
+        let mut sliced = &datum[..];
         let avro = from_avro_datum(schema, &mut sliced, None).unwrap();
         let _ = builder.add_val(&avro);
     });
-    let sa = builder
-        .build()
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .unwrap()
-        .to_owned();
+    let sa = builder.try_build_struct_array().unwrap();
     sa.into()
 }
 
 pub fn per_datum_deserialize_arrow_multi(
-    data: ArrayRef,
+    data: Vec<&[u8]>,
     schema: &AvroSchema,
     num_chunks: usize,
 ) -> Vec<RecordBatch> {
     let arrow_schema = Arc::new(to_arrow_schema(schema).unwrap());
     let fields = &arrow_schema.fields;
-    let arr = data
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .ok_or_else(|| anyhow!("Error downcasting input data to BinaryArray"))
-        .unwrap();
+    let arr = Arc::new(BinaryArray::from_vec(data));
     let mut slices = vec![];
     let cores = num_chunks;
     let chunk_size = arr.len() / cores;
@@ -76,13 +59,7 @@ pub fn per_datum_deserialize_arrow_multi(
                 let deserialized = from_avro_datum(schema, &mut sliced, None).unwrap();
                 let _ = builder.add_val(&deserialized);
             });
-            let d = builder
-                .build()
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .unwrap()
-                .to_owned();
+            let d = builder.try_build_struct_array().expect("Failed to build struct from record");
             let dd: RecordBatch = d.into();
             dd
         })
@@ -161,121 +138,16 @@ mod tests {
         let avro_datum = "4834346437643065662d613264662d343833652d393261312d313532333830366164656334380a4c696e64610857617265022c6c696e646173636f7474406578616d706c652e6e6574062628323636293734302d31323737783031313432283030312d3935392d3839342d36353030783739392a3030312d3339362d3831392d363830307830303139000006044d72100866696e640e10617070726f6163680c00c0f691c7c35f";
         let encoded = decode_hex(avro_datum);
         let newv = vec![&encoded[..], &encoded[..], &encoded[..], &encoded[..]];
-        let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
+        // let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
         // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        let fields = crate::schema_translate::to_arrow_schema(&parsed_schema).unwrap();
+        let fields = to_arrow_schema(&parsed_schema).unwrap();
         println!("{:?}", fields);
         // let data =
-        let result = per_datum_deserialize_arrow(arrow_array, &parsed_schema);
+        let result = per_datum_deserialize(&newv, &parsed_schema);
         println!("{:?}", result);
         // println!("{:?}", decoded);
     }
-
-    // #[test]
-    // fn test_per_datum_deserialize() {
-    //     let s = r#"{
-    //         "type": "record",
-    //         "name": "UserData",
-    //         "namespace": "com.example",
-    //         "fields": [
-    //           {
-    //             "name": "userId",
-    //             "type": "string"
-    //           },
-    //           {
-    //             "name": "age",
-    //             "type": "int"
-    //           },
-    //           {
-    //             "name": "fullName",
-    //             "type": {
-    //               "type": "record",
-    //               "name": "FullName",
-    //               "fields": [
-    //                 {"name": "firstName", "type": "string"},
-    //                 {"name": "lastName", "type": "string"}
-    //               ]
-    //             }
-    //           },
-    //           {
-    //             "name": "email",
-    //             "type": ["null", "string"],
-    //             "default": null
-    //           },
-    //           {
-    //             "name": "phoneNumbers",
-    //             "type": {
-    //               "type": "array",
-    //               "items": "string"
-    //             }
-    //           },
-    //           {
-    //             "name": "isPremiumMember",
-    //             "type": "boolean"
-    //           },
-    //           {
-    //             "name": "favoriteItems",
-    //             "type": {
-    //               "type": "map",
-    //               "values": "int"
-    //             }
-    //           },
-    //           {
-    //             "name": "registrationDate",
-    //             "type": {
-    //               "type": "long",
-    //               "logicalType": "timestamp-millis"
-    //             }
-    //           }
-    //         ]
-    //       }"#;
-        // let parsed_schema = parse_schema(s).unwrap();
-        // let avro_datum = "4834346437643065662d613264662d343833652d393261312d313532333830366164656334380a4c696e64610857617265022c6c696e646173636f7474406578616d706c652e6e6574062628323636293734302d31323737783031313432283030312d3935392d3839342d36353030783739392a3030312d3339362d3831392d363830307830303139000006044d72100866696e640e10617070726f6163680c00c0f691c7c35f";
-        // let encoded = decode_hex(avro_datum);
-        // let decoded = per_datum_deserialize_arrow(&vec![encoded], &parsed_schema);
-        //
-        // let expected = Value::Record(vec![
-        //     (
-        //         "userId".into(),
-        //         Value::String("44d7d0ef-a2df-483e-92a1-1523806adec4".into()),
-        //     ),
-        //     ("age".into(), Value::Int(28)),
-        //     (
-        //         "fullName".into(),
-        //         Value::Record(vec![
-        //             ("firstName".into(), Value::String("Linda".into())),
-        //             ("lastName".into(), Value::String("Ware".into())),
-        //         ]),
-        //     ),
-        //     (
-        //         "email".into(),
-        //         Value::Union(1, Box::new(Value::String("lindascott@example.net".into()))),
-        //     ),
-        //     (
-        //         "phoneNumbers".into(),
-        //         Value::Array(vec![
-        //             Value::String("(266)740-1277x01142".into()),
-        //             Value::String("001-959-894-6500x799".into()),
-        //             Value::String("001-396-819-6800x0019".into()),
-        //         ]),
-        //     ),
-        //     ("isPremiumMember".into(), Value::Boolean(false)),
-        //     (
-        //         "favoriteItems".into(),
-        //         Value::Map(HashMap::from([
-        //             ("Mr".into(), Value::Int(8)),
-        //             ("find".into(), Value::Int(7)),
-        //             ("approach".into(), Value::Int(6)),
-        //         ])),
-        //     ),
-        //     (
-        //         "registrationDate".into(),
-        //         Value::TimestampMillis(1641154756000i64),
-        //     ),
-        // ]);
-        // assert!(&expected == decoded.get(0).unwrap().as_ref().unwrap());
-    // }
 
     #[test]
     fn test_struct_nested_in_list() {
@@ -331,12 +203,12 @@ mod tests {
         let avro_datum = "084a6f686e06446f653c041431323320456c6d20537412536f6d6577686572650a313233343514343536204f616b20537410416e7977686572650a36373839300002286a6f686e2e646f65406578616d706c652e636f6d";
         let encoded = decode_hex(avro_datum);
         let newv = vec![&encoded[..]];
-        let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
+        // let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
         // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         let fields = crate::schema_translate::to_arrow_schema(&parsed_schema).unwrap();
         println!("{:?}", fields);
-        let result = per_datum_deserialize_arrow(arrow_array, &parsed_schema);
+        let result = per_datum_deserialize(&newv, &parsed_schema);
         println!("{:?}", result);
     }
 
@@ -353,12 +225,12 @@ mod tests {
         let avro_datum = "ccb502";
         let encoded = decode_hex(avro_datum);
         let newv = vec![&encoded[..]];
-        let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
+        // let arrow_array = Arc::new(BinaryArray::from_vec(newv)) as ArrayRef;
         // let decoded = per_datum_arrow_deserialize(arrow_array, &parsed_schema);
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         let fields = to_arrow_schema(&parsed_schema).unwrap();
         println!("{:?}", fields);
-        let result = per_datum_deserialize_arrow(arrow_array, &parsed_schema);
+        let result = per_datum_deserialize(&newv, &parsed_schema);
         println!("{:?}", result);
     }
 }
