@@ -123,13 +123,14 @@ fn schema_to_field_with_props(
             DataType::Struct(fields?)
         }
         AvroSchema::Enum(EnumSchema { symbols, name, .. }) => {
-            return Ok(Field::new_dict(
-                name.fullname(None),
-                index_type(symbols.len()),
-                false,
-                0,
-                false,
-            ))
+            // return Ok(Field::new_dict(
+            //     name.fullname(None),
+            //     index_type(symbols.len()),
+            //     false,
+            //     0,
+            //     false,
+            // ))
+            return Ok(Field::new(name.fullname(None), DataType::Utf8, false))
         }
         AvroSchema::Fixed(FixedSchema { size, .. }) => DataType::FixedSizeBinary(*size as i32),
         AvroSchema::Decimal(DecimalSchema {

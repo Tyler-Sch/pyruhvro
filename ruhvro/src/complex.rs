@@ -1,11 +1,6 @@
 use anyhow::{anyhow, Result};
 use apache_avro::types::Value;
-use arrow::array::{
-    make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder,
-    Date32Builder, Float32Builder, GenericListArray, Int32Builder,
-    Int64Builder, MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder,
-    TimestampMillisecondBuilder, UnionArray,
-};
+use arrow::array::{make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder, Date32Builder, Float32Builder, GenericListArray, Int32Builder, Int64Builder, MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, UnionArray, Int8Builder, UInt32Builder};
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, TimeUnit};
 use std::collections::HashMap;
@@ -114,7 +109,7 @@ impl ListContainer {
         let mut offsets = Vec::with_capacity(capacity + 1);
         offsets.push(0);
         let nulls = BooleanBufferBuilder::new(capacity);
-        Ok(ListContainer {
+        Ok(Self {
             fields,
             inner_field: inner_field.clone(),
             inner_builder,
@@ -200,7 +195,7 @@ impl StructContainer {
             builders.push((f.clone(), b));
         }
         let nulls = BooleanBufferBuilder::new(capacity);
-        Ok(StructContainer {
+        Ok(Self {
             fields: Arc::new(Field::new("stuct_field", DataType::Struct(fields), false)),
             builders,
             nulls,
@@ -280,7 +275,7 @@ impl UnionContainer {
             } else {
                 Err(anyhow!("error creating nested builders in Union"))
             }?;
-        Ok(UnionContainer {
+        Ok(Self {
             type_ids,
             type_id_vec: vec![],
             value_offsets_buffer: vec![],
@@ -350,7 +345,7 @@ impl MapContainer {
                     field.is_nullable(),
                 ));
                 let il = ListContainer::try_new(wrapped, capacity)?;
-                let mc = MapContainer {
+                let mc = Self {
                     fields: field.clone(),
                     inner_list: il,
                 };
@@ -394,8 +389,33 @@ impl MapContainer {
     }
 }
 
-
-pub fn add_data_to_array_builder(
+// struct EnumContainer {
+//     field: FieldRef,
+//     values: StringBuilder
+// }
+//
+// impl EnumContainer {
+//     fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
+//         let values = StringBuilder::with_capacity(capacity, capacity * 16);
+//         Ok(Self {field, values})
+//     }
+//     fn add_val(&mut self, avro_val: &Value) -> Result<()> {
+//         let av = get_val_from_possible_union(avro_val, &self.field);
+//         match av {
+//             Value::Enum(key, val) => {
+//                 self.values.append_value(val)
+//             }
+//             Value::Null => self.values.append_null(),
+//             _ => unreachable!()
+//         }
+//         Ok(())
+//     }
+//
+//     fn build(self) -> Result<ArrayRef> {
+//         unimplemented!()
+//     }
+// }
+fn add_data_to_array_builder(
     data: &Value,
     builder: &mut Box<dyn ArrayBuilder>,
     field: &Field,
@@ -441,8 +461,12 @@ pub fn add_data_to_array_builder(
         DataType::Utf8 => {
             let ta = get_typed_array::<StringBuilder>(builder);
             if let Value::String(s) = data {
-                ta.append_value(s.clone());
-            } else {
+                ta.append_value(s);
+            }
+            else if let Value::Enum(_k, v) = data {
+                ta.append_value(v);
+            }
+            else {
                 ta.append_null();
             }
         }
@@ -451,7 +475,7 @@ pub fn add_data_to_array_builder(
 }
 
 #[inline]
-fn get_typed_array<'a, T: ArrayBuilder>(arr: &'a mut Box<dyn ArrayBuilder>) -> &mut T {
+fn get_typed_array<T: ArrayBuilder>(arr: &mut Box<dyn ArrayBuilder>) -> &mut T {
     arr.as_any_mut()
         .downcast_mut::<T>()
         .expect("Did not find expected builder")
