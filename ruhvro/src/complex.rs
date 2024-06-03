@@ -1,6 +1,11 @@
 use anyhow::{anyhow, Result};
 use apache_avro::types::Value;
-use arrow::array::{make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder, Date32Builder, Float32Builder, GenericListArray, Int32Builder, Int64Builder, MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, UnionArray, Int8Builder, UInt32Builder};
+use arrow::array::{
+    make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder,
+    Date32Builder, Float32Builder, GenericListArray, Int32Builder, Int64Builder, MapArray,
+    StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
+    UnionArray,
+};
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, TimeUnit};
 use std::collections::HashMap;
@@ -31,22 +36,22 @@ impl AvroToArrowBuilder {
         match field.data_type() {
             DataType::List(_inner) => {
                 let lc = ListContainer::try_new(field.clone(), capacity)?;
-                Ok(AvroToArrowBuilder::List(Box::new(lc)))
+                Ok(Self::List(Box::new(lc)))
             }
             DataType::Struct(_flds) => {
                 let sc = StructContainer::try_new(field.clone(), capacity)?;
-                Ok(AvroToArrowBuilder::Struct(Box::new(sc)))
+                Ok(Self::Struct(Box::new(sc)))
             }
             DataType::Union(_union_fields, _union_type) => {
                 let uc = UnionContainer::try_new(field.clone(), capacity)?;
-                Ok(AvroToArrowBuilder::Union(Box::new(uc)))
+                Ok(Self::Union(Box::new(uc)))
             }
             DataType::Map(_fr, _ordered) => {
                 let mc = MapContainer::try_new(field.clone(), capacity)?;
-                Ok(AvroToArrowBuilder::Map(Box::new(mc)))
+                Ok(Self::Map(Box::new(mc)))
             }
             // DataType::Map(_, _) => {}
-            _ => Ok(AvroToArrowBuilder::Primitive(make_builder(
+            _ => Ok(Self::Primitive(make_builder(
                 field.data_type(),
                 capacity,
             ))),
@@ -55,19 +60,19 @@ impl AvroToArrowBuilder {
 
     fn add_val(&mut self, avro_val: &Value, field: &FieldRef) -> Result<()> {
         match self {
-            AvroToArrowBuilder::Primitive(b) => {
+            Self::Primitive(b) => {
                 add_data_to_array_builder(avro_val, b, field);
             }
-            AvroToArrowBuilder::List(list_container) => {
+            Self::List(list_container) => {
                 list_container.add_val(avro_val)?;
             }
-            AvroToArrowBuilder::Struct(struct_container) => {
+            Self::Struct(struct_container) => {
                 struct_container.add_val(avro_val)?;
             }
-            AvroToArrowBuilder::Union(union_container) => {
+            Self::Union(union_container) => {
                 union_container.add_val(avro_val)?;
             }
-            AvroToArrowBuilder::Map(map_builder) => {
+            Self::Map(map_builder) => {
                 map_builder.add_val(avro_val)?;
             }
         }
@@ -75,14 +80,14 @@ impl AvroToArrowBuilder {
     }
     fn build(self) -> Result<ArrayRef> {
         match self {
-            AvroToArrowBuilder::Primitive(mut builder) => {
+            Self::Primitive(mut builder) => {
                 let a = builder.finish();
                 Ok(a)
             }
-            AvroToArrowBuilder::List(list_container) => list_container.build(),
-            AvroToArrowBuilder::Struct(sb) => sb.build(),
-            AvroToArrowBuilder::Union(ub) => ub.build(),
-            AvroToArrowBuilder::Map(mb) => mb.build(),
+            Self::List(list_container) => list_container.build(),
+            Self::Struct(sb) => sb.build(),
+            Self::Union(ub) => ub.build(),
+            Self::Map(mb) => mb.build(),
         }
     }
 }
@@ -157,18 +162,19 @@ impl ListContainer {
     }
 }
 pub struct StructContainer {
+    /// Contains the basic pieces of a arrow Struct Array Builder.
     fields: FieldRef,
     builders: Vec<(FieldRef, AvroToArrowBuilder)>,
     nulls: BooleanBufferBuilder,
 }
 
 impl StructContainer {
-    // takes field ref for a struct array
-    // let container_f = Arc::new(Field::new(
-    // "struct_f",
-    // DataType::Struct(Fields::from(vec![f1.clone(), f2.clone()])),
-    // false,
-    // ));
+    /// takes field ref for a struct array
+    /// let container_f = Arc::new(Field::new(
+    /// "struct_f",
+    /// DataType::Struct(Fields::from(vec![f1.clone(), f2.clone()])),
+    /// false,
+    /// ));
     pub fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
         let mut builders = vec![];
         let _create_builders = if let DataType::Struct(flds) = field.clone().data_type() {
@@ -196,7 +202,7 @@ impl StructContainer {
         }
         let nulls = BooleanBufferBuilder::new(capacity);
         Ok(Self {
-            fields: Arc::new(Field::new("stuct_field", DataType::Struct(fields), false)),
+            fields: Arc::new(Field::new("struct_field", DataType::Struct(fields), false)),
             builders,
             nulls,
         })
@@ -206,11 +212,11 @@ impl StructContainer {
         let av = get_val_from_possible_union(avro_val, &self.fields);
         match av {
             Value::Null => {
-                self.nulls.append(false);
+                // self.nulls.append(false);
                 // might need to append fake default values for all items
                 // this wont work since null array needs to be same
                 // length as first array created by builders
-                unimplemented!()
+                unimplemented!("Null records are currently unsupported")
             }
             Value::Record(inner_vals) => {
                 for (idx, (_field_name, v)) in inner_vals.iter().enumerate() {
@@ -389,32 +395,6 @@ impl MapContainer {
     }
 }
 
-// struct EnumContainer {
-//     field: FieldRef,
-//     values: StringBuilder
-// }
-//
-// impl EnumContainer {
-//     fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
-//         let values = StringBuilder::with_capacity(capacity, capacity * 16);
-//         Ok(Self {field, values})
-//     }
-//     fn add_val(&mut self, avro_val: &Value) -> Result<()> {
-//         let av = get_val_from_possible_union(avro_val, &self.field);
-//         match av {
-//             Value::Enum(key, val) => {
-//                 self.values.append_value(val)
-//             }
-//             Value::Null => self.values.append_null(),
-//             _ => unreachable!()
-//         }
-//         Ok(())
-//     }
-//
-//     fn build(self) -> Result<ArrayRef> {
-//         unimplemented!()
-//     }
-// }
 fn add_data_to_array_builder(
     data: &Value,
     builder: &mut Box<dyn ArrayBuilder>,
@@ -462,11 +442,9 @@ fn add_data_to_array_builder(
             let ta = get_typed_array::<StringBuilder>(builder);
             if let Value::String(s) = data {
                 ta.append_value(s);
-            }
-            else if let Value::Enum(_k, v) = data {
+            } else if let Value::Enum(_k, v) = data {
                 ta.append_value(v);
-            }
-            else {
+            } else {
                 ta.append_null();
             }
         }
@@ -622,7 +600,8 @@ mod tests {
             .value(0);
         assert_eq!(a, 1);
         let b = result
-            .clone().as_struct()
+            .clone()
+            .as_struct()
             .column(1)
             .as_any()
             .downcast_ref::<StringArray>()
@@ -686,10 +665,23 @@ mod tests {
             ("my_key".into(), Value::Int(1)),
             ("second".into(), Value::Int(3)),
         ]));
-        let r = mc.add_val(&avro_val);
-        println!("{:?}", r);
+        let _r = mc.add_val(&avro_val);
         let result = mc.build().unwrap();
-        println!("{:?}", result);
+        let map_result = result.as_map();
+        let key_result = map_result
+            .keys()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let value_result = map_result
+            .values()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let expected_keys = StringArray::from(vec!["my_key", "second"]);
+        let expected_values = Int32Array::from(vec![1, 3]);
+        assert_eq!(key_result, &expected_keys);
+        assert_eq!(value_result, &expected_values);
     }
     #[test]
     fn test_nested_struct() {

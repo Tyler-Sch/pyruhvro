@@ -6,12 +6,11 @@ use arrow::datatypes::{
     DataType, Field, Fields, IntervalUnit, Schema, TimeUnit, UnionFields, UnionMode,
 };
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::sync::Arc;
 
+/// Kindly borrowed and slightly modified from data fusion
 #[derive(Debug)]
 pub struct ArrowAvro {
-
     pub avro_schema: AvroSchema,
     pub arrow_schema: Schema,
 }
@@ -122,16 +121,9 @@ fn schema_to_field_with_props(
                 .collect();
             DataType::Struct(fields?)
         }
-        AvroSchema::Enum(EnumSchema { symbols, name, .. }) => {
-            // return Ok(Field::new_dict(
-            //     name.fullname(None),
-            //     index_type(symbols.len()),
-            //     false,
-            //     0,
-            //     false,
-            // ))
-            return Ok(Field::new(name.fullname(None), DataType::Utf8, false))
-        }
+        AvroSchema::Enum(EnumSchema {
+            symbols: _, name, ..
+        }) => return Ok(Field::new(name.fullname(None), DataType::Utf8, false)),
         AvroSchema::Fixed(FixedSchema { size, .. }) => DataType::FixedSizeBinary(*size as i32),
         AvroSchema::Decimal(DecimalSchema {
             precision, scale, ..
@@ -220,18 +212,6 @@ fn default_field_name(dt: &DataType) -> &str {
     }
 }
 
-fn index_type(len: usize) -> DataType {
-    if len <= usize::from(u8::MAX) {
-        DataType::Int8
-    } else if len <= usize::from(u16::MAX) {
-        DataType::Int16
-    } else if usize::try_from(u32::MAX).map(|i| len < i).unwrap_or(false) {
-        DataType::Int32
-    } else {
-        DataType::Int64
-    }
-}
-
 fn external_props(schema: &AvroSchema) -> HashMap<String, String> {
     let mut props = HashMap::new();
     match &schema {
@@ -291,5 +271,3 @@ pub fn aliased(alias: &Alias, namespace: Option<&str>, default_namespace: Option
         }
     }
 }
-
-
