@@ -1,3 +1,6 @@
+//! Python extensions for transforming a vector of avro encoded binary data to an
+//! apache arrow record batch
+//!
 use arrow::array::RecordBatch;
 use arrow::pyarrow::PyArrowType;
 use pyo3::prelude::*;

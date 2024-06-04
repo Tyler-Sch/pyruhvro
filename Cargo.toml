@@ -1,3 +1,4 @@
+
 [profile.release]
 codegen-units = 1
 lto = "fat"
@@ -11,6 +12,10 @@ members = [
 name = "pyruhvro"
 version = "0.1.0"
 edition = "2021"
+keywords = ["avro", "arrow", "kafka"]
+description = "Fast, multi-threaded deserialization of schema-less avro encoded messages"
+repository = "https://github.com/Tyler-Sch/pyruhvro"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
