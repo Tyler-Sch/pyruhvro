@@ -1,5 +1,9 @@
 #![warn(clippy::pedantic)]
 //! Crate to deserialize avro and return arrow.
+//!
+//! This library was made to enable quick efficient transformation of schemaless encoded avro
+//! data into arrow record batches.
+//!
 
 
 /// Converts Avro to Arrow
