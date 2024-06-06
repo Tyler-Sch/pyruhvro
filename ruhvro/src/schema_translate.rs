@@ -69,7 +69,7 @@ fn schema_to_field_with_props(
             let map_field = Arc::new(Field::new(
                 name.unwrap_or("mapcol"),
                 DataType::Struct(Fields::from(vec![key_field, value_field])),
-                false,
+                nullable,
             ));
             DataType::Map(map_field, false)
         }
@@ -114,7 +114,7 @@ fn schema_to_field_with_props(
                     schema_to_field_with_props(
                         &field.schema,
                         Some(&format!("{}.{}", name.fullname(None), field.name)),
-                        false,
+                        nullable,
                         Some(props),
                     )
                 })
@@ -123,7 +123,7 @@ fn schema_to_field_with_props(
         }
         AvroSchema::Enum(EnumSchema {
             symbols: _, name, ..
-        }) => return Ok(Field::new(name.fullname(None), DataType::Utf8, false)),
+        }) => return Ok(Field::new(name.fullname(None), DataType::Utf8, nullable)),
         AvroSchema::Fixed(FixedSchema { size, .. }) => DataType::FixedSizeBinary(*size as i32),
         AvroSchema::Decimal(DecimalSchema {
             precision, scale, ..
