@@ -2,8 +2,8 @@ use anyhow::{anyhow, Result};
 use apache_avro::types::Value;
 use arrow::array::{
     make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder,
-    Date32Builder, Float32Builder, GenericListArray, Int32Builder, Int64Builder, MapArray,
-    StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
+    Date32Builder, Float32Builder, Float64Builder, GenericListArray, Int32Builder, Int64Builder,
+    MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
     UnionArray,
 };
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
@@ -51,10 +51,7 @@ impl AvroToArrowBuilder {
                 Ok(Self::Map(Box::new(mc)))
             }
             // DataType::Map(_, _) => {}
-            _ => Ok(Self::Primitive(make_builder(
-                field.data_type(),
-                capacity,
-            ))),
+            _ => Ok(Self::Primitive(make_builder(field.data_type(), capacity))),
         }
     }
 
@@ -212,11 +209,11 @@ impl StructContainer {
         let av = get_val_from_possible_union(avro_val, &self.fields);
         match av {
             Value::Null => {
-                // self.nulls.append(false);
-                // might need to append fake default values for all items
-                // this wont work since null array needs to be same
-                // length as first array created by builders
-                unimplemented!("Null records are currently unsupported")
+                for idx in 0..self.builders.len() {
+                    let builder = &mut self.builders[idx];
+                    let _ = builder.1.add_val(&Value::Null, &builder.0)?;
+                }
+                self.nulls.append(false);
             }
             Value::Record(inner_vals) => {
                 for (idx, (_field_name, v)) in inner_vals.iter().enumerate() {
@@ -375,7 +372,7 @@ impl MapContainer {
                 let wrapped_list = Value::Array(inside_vec);
                 self.inner_list.add_val(&wrapped_list)?;
             }
-            Value::Null => unimplemented!(),
+            Value::Null => self.inner_list.add_val(&Value::Null)?,
             _ => unreachable!(),
         }
         Ok(())
@@ -417,6 +414,10 @@ fn add_data_to_array_builder(
         DataType::Float32 => {
             let target = get_typed_array::<Float32Builder>(builder);
             add_val!(data, target, field, Float);
+        }
+        DataType::Float64 => {
+            let target = get_typed_array::<Float64Builder>(builder);
+            add_val!(data, target, field, Double)
         }
         DataType::Timestamp(a, _) => {
             let _ = match a {
@@ -726,7 +727,6 @@ mod tests {
         ]);
 
         let _r = sb.add_val(&avro_outer_struct);
-        // println!("{:?}", _r);
         let avro_list_val = Value::Int(2);
         let avro_list = Value::Array(vec![avro_list_val]);
         let avro_inside_nested_struct_int = Value::Int(3);
@@ -776,5 +776,37 @@ mod tests {
         let expected_str: Box<dyn Array> =
             Box::new(StringArray::from(vec![Some("hello".to_string()), None]));
         assert_eq!(result_str, expected_str.into());
+    }
+
+    #[test]
+    fn test_struct_array_with_nulls() {
+        let f1 = Field::new("int_field", DataType::Int32, true);
+        let f2 = Field::new("str_field", DataType::Utf8, true);
+        let k_field = Field::new("key", DataType::Utf8, false);
+        let v_field = Field::new("value", DataType::Int32, true);
+        let struct_field = Arc::new(Field::new(
+            "struct_f",
+            DataType::Struct(Fields::from(vec![k_field, v_field])),
+            false,
+        ));
+        let map_field = Field::new("map_f", DataType::Map(struct_field.clone(), false), true);
+        let fields = Fields::from(vec![f1, f2, map_field]);
+        let mut struct_container = StructContainer::try_new_from_fields(fields, 2).unwrap();
+        let avro_val = Value::Record(vec![
+            ("int_field".to_string(), Value::Null),
+            ("str_field".to_string(), Value::Null),
+            ("map_f".to_string(), Value::Null),
+        ]);
+        struct_container.add_val(&avro_val).unwrap();
+        let got = struct_container.build().unwrap().as_struct().to_owned();
+        assert_eq!(got.null_count(), 0);
+        let int_col = got.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(int_col.null_count(), 1);
+        let str_col = got
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(str_col.null_count(), 1);
     }
 }
