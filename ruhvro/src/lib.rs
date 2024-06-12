@@ -38,7 +38,6 @@
 pub mod deserialize;
 mod schema_translate;
 mod complex;
-mod conversions;
 
 #[cfg(test)]
 mod tests {

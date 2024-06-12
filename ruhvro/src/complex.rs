@@ -6,9 +6,8 @@ use arrow::array::{
     MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
     UnionArray,
 };
-use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, TimeUnit, UnionFields};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 macro_rules! add_val {
@@ -260,20 +259,17 @@ struct UnionContainer {
     // contains the current max offset for each type
     // position_mapping: HashMap<i8, i32>,
     union_fields: UnionFields,
-
 }
 impl UnionContainer {
     fn try_new(field: FieldRef, capacity: usize) -> Result<Self> {
         let mut builders = vec![];
-        let mut type_ids = vec![];
-        // let mut position_mapping = HashMap::new();
+        let type_ids = vec![];
         let mut unionf = UnionFields::empty();
         let _create_builders =
             if let DataType::Union(union_fields, _unionmode) = field.clone().data_type() {
                 for (_, field_ref) in union_fields.iter() {
                     let builder = AvroToArrowBuilder::try_new(field_ref, capacity)?;
                     builders.push((field_ref.clone(), builder));
-                    // position_mapping.insert(idx, 0);
                 }
                 unionf = union_fields.clone();
                 Ok(())
@@ -291,59 +287,29 @@ impl UnionContainer {
     /// Adds value to Union. Union needs to track additional meta data
     fn add_val(&mut self, avro_val: &Value) -> Result<()> {
         if let Value::Union(field_idx, val) = avro_val {
-            // self.union_fields.iter().zip(self.builders.iter()).for_each(|(uf, builder)| {
-            //     if field_idx == &u32::from(uf.0) {
-            //         let b = builder.1.add_val()
-            //
-            //     }
-            // })
             for (i, f) in self.union_fields.iter().enumerate() {
                 let b = &mut self.builders[i].1;
                 if &u32::try_from(f.0)? == field_idx {
                     b.add_val(val, f.1)?;
                     self.type_ids.push(i as i8);
-                } else {b.add_val(&Value::Null, f.1)?;}
-
+                } else {
+                    b.add_val(&Value::Null, f.1)?;
+                }
             }
-            // let builder = &mut self.builders[*field_idx as usize];
-            // let type_idx = *field_idx as i8;
-            // builder.1.add_val(val, &builder.0)?;
-            //
-            // let current_idx = self.position_mapping.get(&type_idx).unwrap();
-            // self.value_offsets_buffer.push(*current_idx);
-            // self.type_id_vec.push(type_idx);
-            // self.position_mapping
-            //     .entry(type_idx)
-            //     .and_modify(|i| *i += 1);
         }
         Ok(())
     }
     fn build(self) -> Result<ArrayRef> {
-        // let type_id_buffer = Buffer::from_vec(self.type_id_vec);
-        // let value_offsets_buffer = Buffer::from_vec(self.value_offsets_buffer);
         let children = self
             .builders
             .into_iter()
-            .map(|(field, arr)| {
-                // let a = Field::new(
-                //     field.name(),
-                //     field.data_type().to_owned(),
-                //     field.is_nullable(),
-                // );
-                // (
-                //     a,
-                    arr.build()
-                        .unwrap_or_else(|e| panic!("Error building union array {}", e)
-                        // )
+            .map(|(_field, arr)| {
+                arr.build().unwrap_or_else(
+                    |e| panic!("Error building union array {}", e), // )
                 )
             })
             .collect::<Vec<_>>();
-        let arr = UnionArray::try_new(
-            self.union_fields,
-            self.type_ids.into(),
-            None,
-            children,
-        )?;
+        let arr = UnionArray::try_new(self.union_fields, self.type_ids.into(), None, children)?;
         Ok(Arc::new(arr))
     }
 }

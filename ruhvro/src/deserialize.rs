@@ -1,6 +1,6 @@
+use crate::complex::StructContainer;
 use crate::schema_translate::to_arrow_schema;
 use std::sync::Arc;
-use crate::complex::StructContainer;
 
 use anyhow::Result;
 use apache_avro::from_avro_datum;
@@ -22,8 +22,7 @@ pub fn parse_schema(schema_string: &str) -> Result<AvroSchema> {
 /// schema to read them.
 pub fn per_datum_deserialize(data: &Vec<&[u8]>, schema: &AvroSchema) -> RecordBatch {
     let fields = to_arrow_schema(schema).unwrap().fields;
-    let mut builder =
-        StructContainer::try_new_from_fields(fields, data.len()).unwrap();
+    let mut builder = StructContainer::try_new_from_fields(fields, data.len()).unwrap();
     data.into_iter().for_each(|datum| {
         let mut sliced = &datum[..];
         let avro = from_avro_datum(schema, &mut sliced, None).unwrap();
@@ -57,14 +56,15 @@ pub fn per_datum_deserialize_arrow_multi(
         .map(|da| {
             // let mut builder = StructBuilder::from_fields(fields.clone(), data.len());
             let mut builder =
-                StructContainer::try_new_from_fields(fields.clone(), arr.len())
-                    .unwrap();
+                StructContainer::try_new_from_fields(fields.clone(), arr.len()).unwrap();
             da.iter().for_each(|avro_data| {
                 let mut sliced = avro_data.unwrap();
                 let deserialized = from_avro_datum(schema, &mut sliced, None).unwrap();
                 let _ = builder.add_val(&deserialized);
             });
-            let d = builder.try_build_struct_array().expect("Failed to build struct from record");
+            let d = builder
+                .try_build_struct_array()
+                .expect("Failed to build struct from record");
             let dd: RecordBatch = d.into();
             dd
         })
@@ -210,7 +210,6 @@ mod tests {
         assert_eq!(result.num_columns(), 5);
     }
 
-
     #[test]
     fn test_enum() {
         let raw_schema = r#"
@@ -243,11 +242,15 @@ mod tests {
         record2.put("b", "bar");
         record2.put("c", "hearts");
         let serialized2 = to_avro_datum(&schema, record2).unwrap();
-        let a =  vec![&serialized[..], &serialized2[..]];
+        let a = vec![&serialized[..], &serialized2[..]];
         let arr = per_datum_deserialize(&a, &schema);
         assert_eq!(arr.num_columns(), 3);
         assert_eq!(arr.num_rows(), 2);
-        let enum_vec = arr.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let enum_vec = arr
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         let expected = StringArray::from(vec!["clubs", "hearts"]);
         assert_eq!(enum_vec, &expected);
     }
@@ -273,10 +276,5 @@ mod tests {
         record.put("b", None::<String>);
         let serialized = to_avro_datum(&parsed_schema, record).unwrap();
         let result = per_datum_deserialize(&vec![&serialized[..]], &parsed_schema);
-        println!("{:?}", result);
     }
-
-
-    // test for errors
-
 }
