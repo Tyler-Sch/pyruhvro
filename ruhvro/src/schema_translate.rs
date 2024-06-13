@@ -94,10 +94,10 @@ fn schema_to_field_with_props(
             } else {
                 let fields = sub_schemas
                     .iter()
-                    .map(|s| schema_to_field_with_props(s, None, has_nullable, None))
+                    .map(|s| schema_to_field_with_props(s, None, true, None))
                     .collect::<Result<Vec<Field>>>()?;
                 let type_ids = 0_i8..fields.len() as i8;
-                DataType::Union(UnionFields::new(type_ids, fields), UnionMode::Dense)
+                DataType::Union(UnionFields::new(type_ids, fields), UnionMode::Sparse)
             }
         }
         AvroSchema::Record(RecordSchema { name, fields, .. }) => {
@@ -209,6 +209,7 @@ fn default_field_name(dt: &DataType) -> &str {
         }
         DataType::Decimal128(_, _) => "decimal",
         DataType::Decimal256(_, _) => "decimal",
+        _ => unimplemented!("data type missing default name"),
     }
 }
 
