@@ -6,6 +6,7 @@ use arrow::pyarrow::PyArrowType;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use ruhvro::deserialize;
+use ruhvro::conversions;
 
 #[pyfunction]
 fn deserialize_array(list: &PyList, schema: &str) -> PyResult<PyArrowType<RecordBatch>> {
@@ -37,6 +38,26 @@ fn deserialize_array_threaded(
     Ok(python_typed_batches)
 }
 
+
+#[pyfunction]
+fn deserialize_array_threaded_remove_union(
+    list: &PyList,
+    schema: &str,
+    num_chunks: usize,
+) -> PyResult<Vec<PyArrowType<RecordBatch>>> {
+    let parsed_schema = deserialize::parse_schema(schema).unwrap();
+    let borrow_list = list
+        .iter()
+        .map(|x| x.extract::<&[u8]>().unwrap())
+        .collect::<Vec<_>>();
+    let record_batches =
+        deserialize::per_datum_deserialize_arrow_multi(borrow_list, &parsed_schema, num_chunks);
+    let python_typed_batches = record_batches
+        .into_iter()
+        .map(|x| PyArrowType(conversions::remove_union_arrays(x)))
+        .collect::<Vec<_>>();
+    Ok(python_typed_batches)
+}
 /// A Python module implemented in Rust.
 #[pymodule]
 fn pyruhvro(_py: Python, m: &PyModule) -> PyResult<()> {
