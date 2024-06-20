@@ -1,15 +1,19 @@
 use anyhow::Result;
+use arrow::array::RecordBatch;
 use arrow::array::{
     Array, ArrayRef, AsArray, BooleanArray, Int32Array, ListArray, StructArray, UnionArray,
 };
 use arrow::buffer::OffsetBuffer;
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields};
 use std::sync::Arc;
-use arrow::array::RecordBatch;
 
 pub fn remove_union_arrays(rb: RecordBatch) -> RecordBatch {
     let s_arr: StructArray = rb.into();
-    let outer_field = Field::new("outer_field", DataType::Struct(s_arr.fields().clone()), false);
+    let outer_field = Field::new(
+        "outer_field",
+        DataType::Struct(s_arr.fields().clone()),
+        false,
+    );
     let converted = convert_unions_to_structs(Arc::new(outer_field), Arc::new(s_arr));
     let result: RecordBatch = converted.1.as_struct().into();
     result
@@ -19,20 +23,23 @@ fn convert_unions_to_structs(fr: FieldRef, ar: ArrayRef) -> (FieldRef, ArrayRef)
         DataType::Struct(_) => {
             let s_array = ar.as_struct().to_owned();
             let (fields, array_data, null_buff) = s_array.into_parts();
-            let converted: StructArray = fields
-                .iter()
-                .zip(array_data)
-                .map(|(f, a)| convert_unions_to_structs(f.clone(), a))
-                .collect::<Vec<_>>()
-                .into();
+            let mut children = vec![];
+            let mut field_vec = vec![];
+            let _converted = fields.iter().zip(array_data).for_each(|(f, a)| {
+                let (converted_schema, child) = convert_unions_to_structs(f.clone(), a);
+                children.push(child);
+                field_vec.push(converted_schema);
+            });
+            let new_struct = StructArray::new(Fields::from(field_vec), children, null_buff);
+
             let converted_fields = Field::new(
                 fr.name(),
-                DataType::Struct(converted.fields().clone()),
-                converted.is_nullable(),
+                DataType::Struct(new_struct.fields().clone()),
+                new_struct.is_nullable(),
             );
             (
                 Arc::new(converted_fields) as FieldRef,
-                Arc::new(converted) as ArrayRef,
+                Arc::new(new_struct) as ArrayRef,
             )
         }
         DataType::Union(_, _) => {

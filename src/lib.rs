@@ -63,5 +63,6 @@ fn deserialize_array_threaded_remove_union(
 fn pyruhvro(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deserialize_array, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize_array_threaded, m)?)?;
+    m.add_function(wrap_pyfunction!(deserialize_array_threaded_remove_union, m)?)?;
     Ok(())
 }
