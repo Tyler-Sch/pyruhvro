@@ -5,9 +5,6 @@ build-backend = "maturin"
 [project]
 name = "pyruhvro"
 requires-python = ">=3.8"
-authors = [
-    { name="Tyler Schauer", email="tylerschauer@gmail.com" },
-]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -17,6 +14,3 @@ dynamic = ["version"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-
-[project.urls]
-Homepage = "https://github.com/Tyler-Sch/pyruhvro"
