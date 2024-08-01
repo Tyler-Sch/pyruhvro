@@ -36,6 +36,7 @@
 /// println!("{:?}", result);
 ///```
 pub mod deserialize;
+pub mod serialize;
 mod schema_translate;
 mod complex;
 

@@ -1,11 +1,13 @@
 //! Python extensions for transforming a vector of avro encoded binary data to an
 //! apache arrow record batch
 //!
-use arrow::array::RecordBatch;
+use arrow::array::{Array, ArrayData, RecordBatch};
 use arrow::pyarrow::PyArrowType;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use ruhvro::deserialize;
+use ruhvro::deserialize::parse_schema;
+use ruhvro::serialize;
 
 #[pyfunction]
 fn deserialize_array(list: &PyList, schema: &str) -> PyResult<PyArrowType<RecordBatch>> {
@@ -37,10 +39,22 @@ fn deserialize_array_threaded(
     Ok(python_typed_batches)
 }
 
+#[pyfunction]
+fn serialize_record_batch(data: PyArrowType<RecordBatch>, schema: &str) -> PyResult<Vec<PyArrowType<ArrayData>>> {
+    let parsed_schema = deserialize::parse_schema(schema).unwrap();
+    let d = data.0;
+    let serialized = serialize::serialize_record_batch(d, &parsed_schema);
+    let python_typed_batches = serialized.into_iter()
+        .map(|x| PyArrowType(x.into_data())).collect::<Vec<_>>();
+    // Ok(PyArrowType(serialized.into_data()))
+    Ok(python_typed_batches)
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn pyruhvro(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deserialize_array, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize_array_threaded, m)?)?;
+    m.add_function(wrap_pyfunction!(serialize_record_batch, m)?)?;
     Ok(())
 }
