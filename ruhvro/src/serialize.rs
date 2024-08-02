@@ -472,6 +472,21 @@ impl<'a> ContainerIter for UnionArrayContainer<'a> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deserialize::parse_schema;
+    use apache_avro::schema::UnionSchema;
+    use apache_avro::Schema;
+    use arrow::array::{
+        Int32Array, Int32Builder, ListBuilder, RecordBatch, StringArray, StructArray,
+        TimestampMillisecondArray,
+    };
+    use arrow::buffer::NullBuffer;
+    use arrow::datatypes::{DataType, Field, Fields, TimeUnit};
+    use std::sync::Arc;
+
 #[test]
 fn test_create_union_multiple_types() {
     let arr1 = Int32Array::from(vec![Some(1), None, None]);
@@ -592,22 +607,6 @@ fn test_primarr_null() {
     let r2 = pa.get_next();
     assert_eq!(Value::Union(0, Box::new(Value::Null)), r2);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::deserialize::parse_schema;
-    use crate::serialize::is_simple_null_union_type;
-    use apache_avro::schema::UnionSchema;
-    use apache_avro::Schema;
-    use arrow::array::{
-        Array, Int32Array, Int32Builder, ListBuilder, RecordBatch, StringArray, StructArray,
-        TimestampMillisecondArray,
-    };
-    use arrow::buffer::NullBuffer;
-    use arrow::datatypes::{DataType, Field, Fields, TimeUnit};
-    use std::sync::Arc;
-
     #[test]
     fn test_convert_to_avro() {
         let int_arr1 = Arc::new(Int32Array::from(vec![1, 2, 3, 4]));

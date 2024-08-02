@@ -49,7 +49,6 @@ impl AvroToArrowBuilder {
                 let mc = MapContainer::try_new(field.clone(), capacity)?;
                 Ok(Self::Map(Box::new(mc)))
             }
-            // DataType::Map(_, _) => {}
             _ => Ok(Self::Primitive(make_builder(field.data_type(), capacity))),
         }
     }
