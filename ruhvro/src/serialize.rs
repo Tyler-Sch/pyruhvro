@@ -4,14 +4,19 @@ use apache_avro::schema::{Name, RecordField, RecordFieldOrder, RecordSchema, Uni
 use apache_avro::to_avro_datum;
 use apache_avro::types::Value;
 use apache_avro::Schema;
+use arrow::array::UnionArray;
 use arrow::array::{
     Array, ArrayAccessor, ArrayIter, ArrayRef, AsArray, BooleanArray, Float32Array,
     GenericBinaryArray, GenericBinaryBuilder, GenericListArray, GenericStringArray, Int32Array,
     PrimitiveArray, RecordBatch, StringArray, StructArray,
 };
+use arrow::buffer::ScalarBuffer;
 use arrow::buffer::{NullBuffer, OffsetBuffer};
+use arrow::datatypes::Float32Type;
+use arrow::datatypes::UnionFields;
 use arrow::datatypes::{DataType, Field, Fields, Int32Type, TimestampMillisecondType};
 use rayon::prelude::*;
+use std::any::Any;
 use std::sync::Arc;
 
 // TODO: Should be checks to make sure avro and arrow schema match
@@ -19,7 +24,23 @@ use std::sync::Arc;
 // TODO: need to figure out names. Should serialize match by name or position?
 // TODO: Should it include namespace in matching?
 // TODO: Map types
+// TODO: Add check for sparse union types
+//TODO: remove any unwraps and check results/errors
 
+/// Serializes a `RecordBatch` into a vector of `GenericBinaryArray<i32>`.
+///
+/// This function takes a `RecordBatch` and a schema as input and serializes the data
+/// in the `RecordBatch` into a vector of `GenericBinaryArray<i32>`. Each `GenericBinaryArray<i32>`
+/// represents a chunk of the serialized data.
+///
+/// # Arguments
+///
+/// * `rb` - The `RecordBatch` to be serialized.
+/// * `schema` - The schema of the `RecordBatch`.
+///
+/// # Returns
+///
+/// A vector of `GenericBinaryArray<i32>` representing the serialized data.
 pub fn serialize_record_batch(rb: RecordBatch, schema: &Schema) -> Vec<GenericBinaryArray<i32>> {
     let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
     let num_chunks = 8;
@@ -33,10 +54,7 @@ pub fn serialize_record_batch(rb: RecordBatch, schema: &Schema) -> Vec<GenericBi
             }
         })
         .collect();
-    slices
-        .par_iter()
-        .map(|x| serialize(schema, x))
-        .collect()
+    slices.par_iter().map(|x| serialize(schema, x)).collect()
 }
 
 fn serialize(schema: &Schema, struct_arry: &ArrayRef) -> GenericBinaryArray<i32> {
@@ -49,7 +67,6 @@ fn serialize(schema: &Schema, struct_arry: &ArrayRef) -> GenericBinaryArray<i32>
     });
     builder.finish()
 }
-
 
 /// Checks if column should be encoded as an avro union type
 fn is_simple_null_union_type(avro_schema: &Schema) -> Option<usize> {
@@ -72,65 +89,16 @@ trait ContainerIter {
     fn next_item(&mut self) -> Option<Value>;
     fn next_chunk(&mut self, num_items: i32) -> Vec<Value>;
 }
-#[derive(Debug)]
-struct PrimArrayContainer<A: ArrayAccessor>
-where
-    A::Item: Into<Value>,
-{
-    arr_iter: ArrayIter<A>,
-    null_info: Option<NullInfo>,
-}
-
-impl<A: ArrayAccessor> PrimArrayContainer<A>
-where
-    A::Item: Into<Value>,
-{
-    fn try_new(arr: A, schema: &Schema) -> Result<Self> {
-        let c = arr;
-        let arr_iter = ArrayIter::new(c);
-        let null_info = NullInfo::try_new(schema).ok();
-        Ok(PrimArrayContainer {
-            arr_iter,
-            null_info,
-        })
-    }
-}
-
-impl<A: ArrayAccessor> ContainerIter for PrimArrayContainer<A>
-where
-    A::Item: Into<Value>,
-{
-    fn next_item(&mut self) -> Option<Value> {
-        let z = self.arr_iter.next();
-        match z {
-            Some(i) => Some(i.map_or(Value::Null, |x| x.into())),
-            None => {
-                panic!("Tried to consume past end of array")
-            }
-        }
-    }
-
-    fn next_chunk(&mut self, num_items: i32) -> Vec<Value> {
-        let mut result = vec![];
-        for _ in 0..num_items {
-            let item = self.next_item();
-            match item {
-                Some(item) => result.push(item),
-                None => panic!("Tried to consume past end of array"),
-            }
-        }
-        result
-    }
-}
 
 #[derive(Debug)]
 enum ArrayContainers<'a> {
-    IntContainer(PrimArrayContainer<&'a PrimitiveArray<Int32Type>>),
     BoolContainer(PrimArrayContainer<&'a BooleanArray>),
+    FloatConatiner(PrimArrayContainer<&'a Float32Array>),
+    IntContainer(PrimArrayContainer<&'a PrimitiveArray<Int32Type>>),
+    ListContainer(Box<ListArrayContainer<'a>>),
+    RecordContainer(Box<StructArrayContainer<'a>>),
     StringContainer(PrimArrayContainer<&'a GenericStringArray<i32>>),
     TimestampMillisContainer(PrimArrayContainer<&'a PrimitiveArray<TimestampMillisecondType>>),
-    RecordContainer(Box<StructArrayContainer<'a>>),
-    ListContainer(Box<ListArrayContainer<'a>>),
     UnionContainer(Box<UnionArrayContainer<'a>>),
 }
 
@@ -140,6 +108,12 @@ impl<'a> ArrayContainers<'a> {
             Schema::Int => {
                 let inner_arr = data.as_primitive::<Int32Type>();
                 Ok(ArrayContainers::IntContainer(PrimArrayContainer::try_new(
+                    inner_arr, schema,
+                )?))
+            }
+            Schema::Float => {
+                let inner_arr = data.as_primitive::<Float32Type>();
+                Ok(ArrayContainers::FloatConatiner(PrimArrayContainer::try_new(
                     inner_arr, schema,
                 )?))
             }
@@ -197,6 +171,7 @@ impl<'a> ArrayContainers<'a> {
                 }
             }
             ArrayContainers::BoolContainer(inner) => inner.next_item().unwrap(),
+            ArrayContainers::FloatConatiner(inner) => inner.next_item().unwrap(),
         }
     }
 
@@ -209,29 +184,54 @@ impl<'a> ArrayContainers<'a> {
             ArrayContainers::UnionContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::TimestampMillisContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::BoolContainer(inner) => inner.next_chunk(num_items),
+            ArrayContainers::FloatConatiner(inner) => inner.next_chunk(num_items),
         }
     }
 }
 
 #[derive(Debug)]
-struct NullInfo {
-    null_idx: usize,
-    non_null_idx: usize,
+struct PrimArrayContainer<A: ArrayAccessor>
+where
+    A::Item: Into<Value>,
+{
+    arr_iter: ArrayIter<A>,
 }
 
-impl NullInfo {
-    fn try_new(schema: &Schema) -> Result<Self> {
-        let is_null_loc = is_simple_null_union_type(schema);
-        match is_null_loc {
-            Some(null_idx) => {
-                let non_null_idx = if null_idx == 0 { 1usize } else { 0 };
-                Ok(NullInfo {
-                    null_idx,
-                    non_null_idx,
-                })
+impl<A: ArrayAccessor> PrimArrayContainer<A>
+where
+    A::Item: Into<Value>,
+{
+    fn try_new(arr: A, _schema: &Schema) -> Result<Self> {
+        let c = arr;
+        let arr_iter = ArrayIter::new(c);
+        Ok(PrimArrayContainer { arr_iter })
+    }
+}
+
+impl<A: ArrayAccessor> ContainerIter for PrimArrayContainer<A>
+where
+    A::Item: Into<Value>,
+{
+    fn next_item(&mut self) -> Option<Value> {
+        let z = self.arr_iter.next();
+        match z {
+            Some(i) => Some(i.map_or(Value::Null, |x| x.into())),
+            None => {
+                panic!("Tried to consume past end of array")
             }
-            None => Err(anyhow!("Column is not nullable")),
         }
+    }
+
+    fn next_chunk(&mut self, num_items: i32) -> Vec<Value> {
+        let mut result = vec![];
+        for _ in 0..num_items {
+            let item = self.next_item();
+            match item {
+                Some(item) => result.push(item),
+                None => panic!("Tried to consume past end of array"),
+            }
+        }
+        result
     }
 }
 #[derive(Debug)]
@@ -355,31 +355,73 @@ impl<'a> ContainerIter for ListArrayContainer<'a> {
 }
 
 #[derive(Debug)]
+struct NullInfo {
+    null_idx: usize,
+    non_null_idx: usize,
+}
+
+impl NullInfo {
+    fn try_new(schema: &Schema) -> Result<Self> {
+        let is_null_loc = is_simple_null_union_type(schema);
+        match is_null_loc {
+            Some(null_idx) => {
+                let non_null_idx = if null_idx == 0 { 1usize } else { 0 };
+                Ok(NullInfo {
+                    null_idx,
+                    non_null_idx,
+                })
+            }
+            None => Err(anyhow!("Column is not nullable")),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct UnionArrayContainer<'a> {
     variants: Vec<ArrayContainers<'a>>,
     null_info: Option<NullInfo>,
+    type_ids: Option<&'a ScalarBuffer<i8>>,
 }
 
 impl<'a> UnionArrayContainer<'a> {
     fn try_new(data: &'a ArrayRef, schema: &Schema) -> Result<Self> {
         let null_info = NullInfo::try_new(schema).ok();
+        // null info only matches on simple null types which would be represented as a null buffer in arrow instead of full UnionArray
+        // need to add check to verify that type_ids match between arrow and avro schemas
         let variants = if let Some(nulls) = &null_info {
             // if type with null and one col, want to have a single array accessor in variants
             match schema {
                 Schema::Union(us) => {
                     let vars = us.variants();
                     let inner_schema = &vars[nulls.non_null_idx];
-                    vec![ArrayContainers::try_new(data, inner_schema)?]
+                    (None, vec![ArrayContainers::try_new(data, inner_schema)?])
                 }
                 _ => panic!("Expected Schema::Union"),
             }
         } else {
-            // need to implement proper union here
-            unimplemented!()
+            match schema {
+                Schema::Union(us) => {
+                    let vars = us.variants();
+                    let mut containers = Vec::with_capacity(vars.len());
+                    let union_arr = data.as_any().downcast_ref::<UnionArray>().unwrap();
+                    let type_ids = union_arr.type_ids();
+                    let _ = us
+                        .variants()
+                        .iter()
+                        .zip(union_arr.type_ids().iter())
+                        .for_each(|(s, i)| {
+                            containers
+                                .push(ArrayContainers::try_new(union_arr.child(*i), s).unwrap())
+                        });
+                    (Some(type_ids), containers)
+                }
+                _ => panic!("Expected Schema::Union"),
+            }
         };
         Ok(UnionArrayContainer {
-            variants,
+            variants: variants.1,
             null_info,
+            type_ids: variants.0,
         })
     }
 }
@@ -394,8 +436,21 @@ impl<'a> ContainerIter for UnionArrayContainer<'a> {
             };
             Some(v)
         } else {
-            // implementation for actual union goes here
-            unimplemented!()
+            let v = self
+                .variants
+                .iter_mut()
+                .zip(self.type_ids.unwrap().iter())
+                .map(|(x, y)| (x.get_next(), *y))
+                .filter(|(x, _)| x != &Value::Null)
+                .map(|(x, y)| Value::Union(y as u32, Box::new(x)))
+                .collect::<Vec<_>>();
+            if v.len() > 1 {
+                panic!("Sparse union types not supported")
+            } else if v.len() == 0 {
+                Some(Value::Null)
+            } else {
+                Some(v[0].clone())
+            }
         }
     }
 
@@ -416,6 +471,45 @@ impl<'a> ContainerIter for UnionArrayContainer<'a> {
         }
     }
 }
+
+#[test]
+fn test_create_union_multiple_types() {
+    let arr1 = Int32Array::from(vec![Some(1), None, None]);
+    let arr2 = StringArray::from(vec![None, None, Some("def")]);
+    let arr3 = BooleanArray::from(vec![None, Some(true), None]);
+
+    let schema = Schema::Union(
+        UnionSchema::new(vec![Schema::Int, Schema::String, Schema::Boolean]).unwrap(),
+    );
+    let fields = UnionFields::new(
+        vec![0, 1, 2],
+        vec![
+            Field::new("int_field", DataType::Int32, true),
+            Field::new("strfield", DataType::Utf8, true),
+            Field::new("bool_field", DataType::Boolean, true),
+        ],
+    );
+    let children: Vec<ArrayRef> = vec![
+        Arc::new(arr1) as ArrayRef,
+        Arc::new(arr2) as ArrayRef,
+        Arc::new(arr3) as ArrayRef,
+    ];
+    let union_arr: ArrayRef =
+        Arc::new(UnionArray::try_new(fields, vec![0, 1, 2].into(), None, children).unwrap());
+    let mut union_container = UnionArrayContainer::try_new(&union_arr, &schema).unwrap();
+
+    let expected_values = vec![
+        Value::Union(0, Box::new(Value::Int(1))),
+        Value::Union(2, Box::new(Value::Boolean(true))),
+        Value::Union(1, Box::new(Value::String("def".into()))),
+    ];
+
+    for (i, expected) in expected_values.iter().enumerate() {
+        let actual = union_container.next_item().unwrap();
+        assert_eq!(*expected, actual, "Mismatch at index {}", i);
+    }
+}
+
 #[test]
 fn test_struct_next_chunk() {
     let inside_arr = Arc::new(Int32Array::from(vec![13, 2]));
