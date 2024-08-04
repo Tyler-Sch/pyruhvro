@@ -4,6 +4,7 @@ use apache_avro::schema::{Name, RecordField, RecordFieldOrder, RecordSchema, Uni
 use apache_avro::to_avro_datum;
 use apache_avro::types::Value;
 use apache_avro::Schema;
+use arrow::array::MapArray;
 use arrow::array::UnionArray;
 use arrow::array::{
     Array, ArrayAccessor, ArrayIter, ArrayRef, AsArray, BooleanArray, Float32Array,
@@ -17,10 +18,10 @@ use arrow::datatypes::UnionFields;
 use arrow::datatypes::{DataType, Field, Fields, Int32Type, TimestampMillisecondType};
 use rayon::prelude::*;
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // TODO: Should be checks to make sure avro and arrow schema match
-// TODO: union type with more than simple variants
 // TODO: need to figure out names. Should serialize match by name or position?
 // TODO: Should it include namespace in matching?
 // TODO: Map types
@@ -445,7 +446,7 @@ impl<'a> ContainerIter for UnionArrayContainer<'a> {
                 .map(|(x, y)| Value::Union(y as u32, Box::new(x)))
                 .collect::<Vec<_>>();
             if v.len() > 1 {
-                panic!("Sparse union types not supported")
+                panic!("Dense union types not supported")
             } else if v.len() == 0 {
                 Some(Value::Null)
             } else {
@@ -455,21 +456,77 @@ impl<'a> ContainerIter for UnionArrayContainer<'a> {
     }
 
     fn next_chunk(&mut self, num_items: i32) -> Vec<Value> {
-        if let Some(nulls) = &self.null_info {
-            let val = self.variants[0].get_next_chunk(num_items);
-            let v = val
-                .into_iter()
-                .map(|x| match x {
-                    Value::Null => Value::Union(nulls.null_idx as u32, Box::new(Value::Null)),
-                    _ => Value::Union(nulls.non_null_idx as u32, Box::new(x)),
-                })
-                .collect::<Vec<_>>();
-            v
-        } else {
-            // implementation for actual union goes here
-            unimplemented!()
-        }
+        (0..num_items).map(|x|
+            self.next_item().unwrap()
+        ).collect()
     }
+}
+
+struct MapArrayContainer<'a> {
+    key_data: ArrayContainers<'a>,
+    value_data: ArrayContainers<'a>,
+    offsets: &'a OffsetBuffer<i32>,
+    null_buff: Option<&'a NullBuffer>,
+    current_pos: usize,
+}
+
+impl<'a> MapArrayContainer<'a> {
+   fn try_new(data: &'a MapArray, schema: &Schema) -> Result<Self> {
+        let offsets = data.offsets();
+        let keys = data.keys();
+        let inner = data.values();
+        let inner_schema = if let Schema::Map(s) = schema {
+            s
+        } else {
+            panic!("{}", format!("Expected map schema got {:?}", schema))
+        };
+
+        let value_data = ArrayContainers::try_new(inner, inner_schema)?;
+        let key_data = ArrayContainers::try_new(keys, &Schema::String).expect("Map keys must be strings");
+        let null_buff = data.nulls();
+        Ok(MapArrayContainer {
+            key_data,
+            value_data,
+            offsets,
+            null_buff,
+            current_pos: 0,
+        })
+    }
+    fn get_value(&mut self) -> Value {
+        let num_vals = self.offsets[self.current_pos + 1] - self.offsets[self.current_pos];
+        let keys = self.key_data.get_next_chunk(num_vals);
+        let values = self.value_data.get_next_chunk(num_vals);
+        Value::Map(keys.into_iter().zip(values.into_iter()).map(|(k,v)| {
+            if let Value::String(s) = k {
+                (s,v)
+            } else {
+                panic!("Map keys must be strings")
+            }
+        }).collect::<HashMap<String,Value>>())
+    }
+}
+
+impl ContainerIter for MapArrayContainer<'_> {
+    fn next_item(&mut self) -> Option<Value> {
+        let vals = if let Some(nb) = self.null_buff {
+            if nb.is_null(self.current_pos) {
+                Value::Null
+            } else {
+                self.get_value()
+            }
+        } else {
+            self.get_value()
+        };
+        self.current_pos += 1;
+        Some(vals)
+    }
+
+    fn next_chunk(&mut self, num_items: i32) -> Vec<Value> {
+        (0..num_items).map(|_| self.next_item().unwrap()).collect()
+    }
+}
+
+impl<'a> MapArrayContainer<'a> {
 }
 
 
@@ -486,6 +543,46 @@ mod tests {
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field, Fields, TimeUnit};
     use std::sync::Arc;
+
+        #[test]
+        fn test_try_new() {
+        // Setup the necessary data
+        let source = vec!["a", "b", "c", "d"];
+        let keys = source.iter().map(|x| *x); 
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3, 4]));
+        let entry_offsets = [0, 2, 4];
+        let map_array = MapArray::new_from_strings(keys, &values, &entry_offsets).unwrap();
+        let schema = Schema::Map(Box::new(Schema::Int));
+
+        // Call the try_new function
+        let result = MapArrayContainer::try_new(&map_array, &schema);
+
+        // Assert the results
+        assert!(result.is_ok());
+        let mut container = result.unwrap();
+
+        let next_item = container.next_item().unwrap();
+        let expected = Value::Map(
+            vec![
+                ("a".to_string(), Value::Int(1)),
+                ("b".to_string(), Value::Int(2)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(expected, next_item);
+
+        let next_item = container.next_item().unwrap();
+        let expected = Value::Map(
+            vec![
+                ("c".to_string(), Value::Int(3)),
+                ("d".to_string(), Value::Int(4)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(expected, next_item);
+    }
 
 #[test]
 fn test_create_union_multiple_types() {
