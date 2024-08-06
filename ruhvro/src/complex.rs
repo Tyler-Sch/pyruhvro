@@ -290,7 +290,7 @@ impl UnionContainer {
                 let b = &mut self.builders[i].1;
                 if &u32::try_from(f.0)? == field_idx {
                     b.add_val(val, f.1)?;
-                    self.type_ids.push(i as i8);
+                    self.type_ids.push(f.0);
                 } else {
                     b.add_val(&Value::Null, f.1)?;
                 }
@@ -344,8 +344,8 @@ impl MapContainer {
                 let mut inside_vec = vec![];
                 for (k, v) in hm.iter() {
                     let rewrapped = Value::Record(vec![
-                        ("key".to_string(), Value::String(k.to_owned())),
-                        ("value".to_string(), v.to_owned()),
+                        ("keys".to_string(), Value::String(k.to_owned())),
+                        ("values".to_string(), v.to_owned()),
                     ]);
                     inside_vec.push(rewrapped)
                 }
@@ -631,9 +631,9 @@ mod tests {
     }
     #[test]
     fn test_map_array() {
-        // todo add asserts
-        let k_field = Field::new("key", DataType::Utf8, false);
-        let v_field = Field::new("value", DataType::Int32, false);
+        // fix asserts. Map values can return different order so test will fail 50% of the time
+        let k_field = Field::new("keys", DataType::Utf8, false);
+        let v_field = Field::new("values", DataType::Int32, false);
         let struct_field = Arc::new(Field::new(
             "struct_f",
             DataType::Struct(Fields::from(vec![k_field, v_field])),
@@ -789,4 +789,5 @@ mod tests {
             .unwrap();
         assert_eq!(str_col.null_count(), 1);
     }
+
 }

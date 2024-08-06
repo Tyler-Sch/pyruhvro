@@ -7,6 +7,7 @@ use arrow::datatypes::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use arrow::compute::or;
 
 /// Kindly borrowed and slightly modified from data fusion
 #[derive(Debug)]
@@ -64,10 +65,10 @@ fn schema_to_field_with_props(
             None,
         )?)),
         AvroSchema::Map(value_schema) => {
-            let value_field = schema_to_field_with_props(value_schema, Some("value"), true, None)?;
-            let key_field = Field::new("key", DataType::Utf8, false);
+            let value_field = schema_to_field_with_props(value_schema, Some("values"), false, None)?;
+            let key_field = Field::new("keys", DataType::Utf8, false);
             let map_field = Arc::new(Field::new(
-                name.unwrap_or("mapcol"),
+                "entries",
                 DataType::Struct(Fields::from(vec![key_field, value_field])),
                 nullable,
             ));
@@ -271,4 +272,26 @@ pub fn aliased(alias: &Alias, namespace: Option<&str>, default_namespace: Option
             None => alias.fullname(None),
         }
     }
+}
+
+#[test]
+fn test_sample() {
+    let schema = r#"
+            {
+                "type": "record",
+                "name": "test",
+                "fields": [
+                    {
+                        "name": "mapppy_field",
+                        "type": {
+                            "type": "map",
+                            "values": "int"
+                        }
+                    }
+                ]
+            }
+        "#;
+    let avro_schema = AvroSchema::parse_str(schema).unwrap();
+    let arrow_schema = to_arrow_schema(&avro_schema).unwrap();
+    println!("{:?}", arrow_schema);
 }

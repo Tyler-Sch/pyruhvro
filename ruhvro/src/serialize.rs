@@ -42,9 +42,8 @@ use std::sync::Arc;
 /// # Returns
 ///
 /// A vector of `GenericBinaryArray<i32>` representing the serialized data.
-pub fn serialize_record_batch(rb: RecordBatch, schema: &Schema) -> Vec<GenericBinaryArray<i32>> {
+pub fn serialize_record_batch(rb: RecordBatch, schema: &Schema, num_chunks: usize) -> Vec<GenericBinaryArray<i32>> {
     let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
-    let num_chunks = 8;
     let chunk_size = struct_arry.len() / num_chunks;
     let slices: Vec<_> = (0..num_chunks)
         .map(|i| {
@@ -101,6 +100,7 @@ enum ArrayContainers<'a> {
     StringContainer(PrimArrayContainer<&'a GenericStringArray<i32>>),
     TimestampMillisContainer(PrimArrayContainer<&'a PrimitiveArray<TimestampMillisecondType>>),
     UnionContainer(Box<UnionArrayContainer<'a>>),
+    MapContainer(Box<MapArrayContainer<'a>>),
 }
 
 impl<'a> ArrayContainers<'a> {
@@ -151,6 +151,9 @@ impl<'a> ArrayContainers<'a> {
             Schema::Union(us) => Ok(ArrayContainers::UnionContainer(Box::new(
                 UnionArrayContainer::try_new(data, schema)?,
             ))),
+            Schema::Map(_) => Ok(ArrayContainers::MapContainer(Box::new(
+                MapArrayContainer::try_new(data.as_any().downcast_ref::<MapArray>().unwrap(), schema)?,
+            ))),
             _ => unimplemented!(),
         }
     }
@@ -173,6 +176,7 @@ impl<'a> ArrayContainers<'a> {
             }
             ArrayContainers::BoolContainer(inner) => inner.next_item().unwrap(),
             ArrayContainers::FloatConatiner(inner) => inner.next_item().unwrap(),
+            ArrayContainers::MapContainer(inner) => inner.next_item().unwrap(),
         }
     }
 
@@ -186,6 +190,7 @@ impl<'a> ArrayContainers<'a> {
             ArrayContainers::TimestampMillisContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::BoolContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::FloatConatiner(inner) => inner.next_chunk(num_items),
+            ArrayContainers::MapContainer(inner) => inner.next_chunk(num_items),
         }
     }
 }
@@ -277,6 +282,9 @@ impl ContainerIter for StructArrayContainer<'_> {
         // needs to handle nulls
         if let Some(nb) = self.null_buff {
             if nb.is_null(self.current_pos) {
+                for i in self.data.iter_mut() {
+                    i.get_next();
+                }
                 self.current_pos += 1;
                 Some(Value::Null)
             } else {
@@ -382,6 +390,7 @@ struct UnionArrayContainer<'a> {
     variants: Vec<ArrayContainers<'a>>,
     null_info: Option<NullInfo>,
     type_ids: Option<&'a ScalarBuffer<i8>>,
+    current_pos: usize,
 }
 
 impl<'a> UnionArrayContainer<'a> {
@@ -409,10 +418,10 @@ impl<'a> UnionArrayContainer<'a> {
                     let _ = us
                         .variants()
                         .iter()
-                        .zip(union_arr.type_ids().iter())
+                        .zip(0..vars.len())
                         .for_each(|(s, i)| {
                             containers
-                                .push(ArrayContainers::try_new(union_arr.child(*i), s).unwrap())
+                                .push(ArrayContainers::try_new(union_arr.child(i as i8), s).unwrap())
                         });
                     (Some(type_ids), containers)
                 }
@@ -423,6 +432,7 @@ impl<'a> UnionArrayContainer<'a> {
             variants: variants.1,
             null_info,
             type_ids: variants.0,
+            current_pos: 0,
         })
     }
 }
@@ -437,21 +447,19 @@ impl<'a> ContainerIter for UnionArrayContainer<'a> {
             };
             Some(v)
         } else {
-            let v = self
+            let current_idx = self.type_ids.unwrap()[self.current_pos];
+            let val = self.variants[current_idx as usize].get_next();
+            let _ = self
                 .variants
                 .iter_mut()
-                .zip(self.type_ids.unwrap().iter())
-                .map(|(x, y)| (x.get_next(), *y))
-                .filter(|(x, _)| x != &Value::Null)
-                .map(|(x, y)| Value::Union(y as u32, Box::new(x)))
-                .collect::<Vec<_>>();
-            if v.len() > 1 {
-                panic!("Dense union types not supported")
-            } else if v.len() == 0 {
-                Some(Value::Null)
-            } else {
-                Some(v[0].clone())
-            }
+                .enumerate()
+                .for_each(|(idx, arr)| {
+                   if idx != current_idx as usize {
+                       arr.get_next();
+                }});
+            self.current_pos += 1;
+            Some(Value::Union(current_idx as u32, Box::new(val)))
+
         }
     }
 
@@ -462,6 +470,7 @@ impl<'a> ContainerIter for UnionArrayContainer<'a> {
     }
 }
 
+#[derive(Debug)]
 struct MapArrayContainer<'a> {
     key_data: ArrayContainers<'a>,
     value_data: ArrayContainers<'a>,
@@ -545,7 +554,7 @@ mod tests {
     use std::sync::Arc;
 
         #[test]
-        fn test_try_new() {
+        fn test_map_container() {
         // Setup the necessary data
         let source = vec!["a", "b", "c", "d"];
         let keys = source.iter().map(|x| *x); 
@@ -798,7 +807,7 @@ fn test_primarr_null() {
         //             .into_iter()
         //             .map(|x| apache_avro::to_avro_datum(&schema, x).unwrap())
         //             .collect::<Vec<_>>();
-        let r = serialize_record_batch(struct_arr_ref.clone(), &schema);
+        let r = serialize_record_batch(struct_arr_ref.clone(), &schema, 1);
         let ra = r
             .iter()
             .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
@@ -860,7 +869,7 @@ fn test_primarr_null() {
         let outer_struct_field = Field::new("test", DataType::Struct(outer_fields), false);
         let arr: RecordBatch = outer_struct_arr.into();
         let parsed_schmea = Schema::parse_str(schmea).unwrap();
-        let arr_cont = serialize_record_batch(arr, &parsed_schmea);
+        let arr_cont = serialize_record_batch(arr, &parsed_schmea, 1);
         println!("{:?}", arr_cont);
         // let mut arr_cont = ArrayContainers::try_new(&arr, &parsed_schmea).unwrap();
         // let r = (0..2).map(|_| {
@@ -930,6 +939,46 @@ fn test_primarr_null() {
         let outer_struct_field = Field::new("test", DataType::Struct(outer_fields), false);
         let arr: ArrayRef = Arc::new(outer_struct_arr);
         let parsed_schmea = Schema::parse_str(schmea).unwrap();
+    }
+
+    #[test]
+    fn test_map_record_round_trip() {
+        let schema = r#"
+            {
+                "type": "record",
+                "name": "test",
+                "fields": [
+                    {
+                        "name": "map_field",
+                        "type": {
+                            "type": "map",
+                            "values": "int"
+                        }
+                    }
+                ]
+            }
+        "#;
+        let keys = vec!["a", "b"];
+        let keys_iter = keys.iter().map(|x| *x);
+        let inner_arr: ArrayRef = Arc::new(Int32Array::from(vec![13, 2]));
+
+        let map_arr = MapArray::new_from_strings(keys_iter, &inner_arr, &[0, 1, 2]).unwrap();
+        let key_field = Field::new("keys", DataType::Utf8, false);
+        let value_field = Field::new("values", DataType::Int32, false);
+        let inner_map_field = Field::new("entries", DataType::Struct(Fields::from(vec![key_field, value_field])), false);
+        let map_field = Field::new("map_field", DataType::Map(Arc::new(inner_map_field), false), false);
+        let fields = Fields::from(vec![map_field]);
+        let record_arr = StructArray::new(fields.clone(), vec![Arc::new(map_arr)], None);
+        let schema = Schema::parse_str(schema).unwrap();
+        let record_arr_ref: RecordBatch = record_arr.into();
+        println!("{:?}", record_arr_ref);
+        let r = serialize_record_batch(record_arr_ref.clone(), &schema, 1);
+        let ra = r
+            .iter()
+            .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let deserialized = crate::deserialize::per_datum_deserialize(&ra[0],&schema);
+        assert_eq!(record_arr_ref,deserialized);
     }
 
     #[test]

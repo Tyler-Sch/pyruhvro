@@ -40,10 +40,10 @@ fn deserialize_array_threaded(
 }
 
 #[pyfunction]
-fn serialize_record_batch(data: PyArrowType<RecordBatch>, schema: &str) -> PyResult<Vec<PyArrowType<ArrayData>>> {
+fn serialize_record_batch(data: PyArrowType<RecordBatch>, schema: &str, num_chunks: usize) -> PyResult<Vec<PyArrowType<ArrayData>>> {
     let parsed_schema = deserialize::parse_schema(schema).unwrap();
     let d = data.0;
-    let serialized = serialize::serialize_record_batch(d, &parsed_schema);
+    let serialized = serialize::serialize_record_batch(d, &parsed_schema, num_chunks);
     let python_typed_batches = serialized.into_iter()
         .map(|x| PyArrowType(x.into_data())).collect::<Vec<_>>();
     // Ok(PyArrowType(serialized.into_data()))

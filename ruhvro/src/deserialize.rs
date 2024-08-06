@@ -277,4 +277,116 @@ mod tests {
         let serialized = to_avro_datum(&parsed_schema, record).unwrap();
         let result = per_datum_deserialize(&vec![&serialized[..]], &parsed_schema);
     }
+
+    #[test]
+    fn test_this_data() {
+        let schema = r#"
+{
+    "type": "record",
+    "name": "User",
+    "fields": [
+        {
+            "name": "name",
+            "type": [
+                "null",
+                "string"
+            ],
+            "default": null
+        },
+        {
+            "name": "age",
+            "type": [
+                "null",
+                "int"
+            ],
+            "default": null
+        },
+        {
+            "name": "emails",
+            "type": {
+                "type": "array",
+                "items": "string"
+            }
+        },
+        {
+            "name": "address",
+            "type": [
+                "null",
+                {
+                    "type": "record",
+                    "name": "Address",
+                    "fields": [
+                        {
+                            "name": "street",
+                            "type": "string"
+                        },
+                        {
+                            "name": "city",
+                            "type": "string"
+                        },
+                        {
+                            "name": "zipcode",
+                            "type": "string"
+                        }
+                    ]
+                }
+            ],
+            "default": null
+        },
+        {
+            "name": "phone_numbers",
+            "type": {
+                "type": "map",
+                "values": "string"
+            }
+        },
+        {
+            "name": "preferences",
+            "type": [
+                "null",
+                {
+                    "type": "record",
+                    "name": "Preferences",
+                    "fields": [
+                        {
+                            "name": "contact_method",
+                            "type": [
+                                "null",
+                                "string"
+                            ],
+                            "default": null
+                        },
+                        {
+                            "name": "newsletter",
+                            "type": "boolean"
+                        }
+                    ]
+                }
+            ],
+            "default": null
+        },
+        {
+            "name": "status",
+            "type": [
+                "null",
+                "string",
+                "int",
+                "boolean"
+            ],
+            "default": null
+        }
+    ]
+}
+
+        "#;
+
+        let parsed_schema = parse_schema(schema).unwrap();
+        println!("{:?}", parsed_schema);
+
+        let avro_datum = "0000062e74686f6d61736b6172656e406578616d706c652e6e657422616c6f7765406578616d706c652e6f72672664617669643738406578616d706c652e636f6d0000060a636865636b203030312d3233372d3438302d353133341065766964656e6365262b312d3732352d3336362d39323133783730300a6d616a6f722428393734293537302d3032313178333534350002020a656d61696c00020a7374616666";
+        let encoded = decode_hex(avro_datum);
+        let newv = vec![&encoded[..]];
+        let result = per_datum_deserialize(&newv, &parsed_schema);
+        println!("{:?}", result);
+    }
 }
