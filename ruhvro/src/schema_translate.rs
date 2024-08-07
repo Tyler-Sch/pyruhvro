@@ -7,14 +7,13 @@ use arrow::datatypes::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use arrow::compute::or;
 
 /// Kindly borrowed and slightly modified from data fusion
-#[derive(Debug)]
-pub struct ArrowAvro {
-    pub avro_schema: AvroSchema,
-    pub arrow_schema: Schema,
-}
+// #[derive(Debug)]
+// pub struct ArrowAvro {
+//     pub avro_schema: AvroSchema,
+//     pub arrow_schema: Schema,
+// }
 
 /// Converts an avro schema to an arrow schema
 pub fn to_arrow_schema(avro_schema: &AvroSchema) -> Result<Schema> {

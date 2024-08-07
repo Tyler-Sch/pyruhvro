@@ -276,6 +276,7 @@ mod tests {
         record.put("b", None::<String>);
         let serialized = to_avro_datum(&parsed_schema, record).unwrap();
         let result = per_datum_deserialize(&vec![&serialized[..]], &parsed_schema);
+        assert_eq!(result.num_columns(), 2);
     }
 
     #[test]

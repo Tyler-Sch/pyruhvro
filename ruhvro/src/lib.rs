@@ -5,7 +5,7 @@
 //! data into arrow record batches.
 //!
 
-
+mod complex;
 /// Converts Avro to Arrow
 /// Decode Avro data returning an Arrow Record Batch.
 /// ## Example
@@ -36,9 +36,9 @@
 /// println!("{:?}", result);
 ///```
 pub mod deserialize;
-pub mod serialize;
 mod schema_translate;
-mod complex;
+mod serialization_containers;
+pub mod serialize;
 
 #[cfg(test)]
 mod tests {
@@ -46,7 +46,6 @@ mod tests {
 
     #[test]
     fn test_round_trip() {
-
         let schema = r#"
         {
             "type": "record",
