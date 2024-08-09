@@ -1,11 +1,6 @@
 use anyhow::{anyhow, Result};
 use apache_avro::types::Value;
-use arrow::array::{
-    make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder,
-    Date32Builder, Float32Builder, Float64Builder, GenericListArray, Int32Builder, Int64Builder,
-    MapArray, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
-    UnionArray,
-};
+use arrow::array::{make_builder, ArrayBuilder, ArrayRef, AsArray, BooleanBufferBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, GenericListArray, Int32Builder, Int64Builder, MapArray, NullBuilder, StringBuilder, StructArray, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, UnionArray};
 use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, TimeUnit, UnionFields};
 use std::sync::Arc;
@@ -429,6 +424,10 @@ fn add_data_to_array_builder(
                 ta.append_null();
             }
         }
+        DataType::Null => {
+            let ta = get_typed_array::<NullBuilder>(builder);
+            ta.append_null();
+        }
         _ => unimplemented!(),
     }
 }
@@ -459,10 +458,7 @@ fn get_val_from_possible_union<'a>(value: &'a Value, field: &'a Field) -> &'a Va
 mod tests {
     use super::*;
     use apache_avro::types::Value;
-    use arrow::array::{
-        Array, ArrayBuilder, BooleanBufferBuilder, Int32Array, Int32Builder, ListArray,
-        RecordBatch, StringArray, StringBuilder, StructArray, UnionArray,
-    };
+    use arrow::array::{Array, ArrayBuilder, BooleanBufferBuilder, Int32Array, Int32Builder, ListArray, NullArray, RecordBatch, StringArray, StringBuilder, StructArray, UnionArray};
     use arrow::datatypes::{DataType, Field, Fields, UnionFields, UnionMode};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -628,6 +624,59 @@ mod tests {
             .value(0)
             .to_string();
         assert_eq!("string time".to_string(), value);
+    }
+    #[test]
+    fn test_union_array_with_many_vals() {
+       let int_f = Arc::new(Field::new("int_field", DataType::Int32, false));
+        let str_f = Arc::new(Field::new("str_field", DataType::Utf8, false));
+        let null_f = Arc::new(Field::new("null_field", DataType::Null, false));
+        let union_fields = UnionFields::new([0, 1, 2], [null_f, int_f.clone(), str_f.clone()]);
+        let union_f = Field::new(
+            "union_f",
+            DataType::Union(union_fields, UnionMode::Sparse),
+            false,
+        );
+
+        let mut uc = UnionContainer::try_new(Arc::new(union_f), 3).unwrap();
+
+        let av = Value::Union(0, Box::new(Value::Null));
+        let _r = uc.add_val(&av);
+        let av = Value::Union(1, Box::new(Value::Int(1)));
+        let _r = uc.add_val(&av);
+        let av = Value::Union(2, Box::new(Value::String("string time".into())));
+        let _r = uc.add_val(&av);
+
+        let result = uc.build().unwrap();
+        let got = result.as_any().downcast_ref::<UnionArray>().unwrap();
+        let value = got
+            .value(0)
+            .as_any()
+            .downcast_ref::<NullArray>()
+            .unwrap()
+            .is_null(0);
+        // per the arrow docs:
+        // "NullArrays do not have a null buffer, and therefore always
+        // return false for is_null."
+        let array = NullArray::new(1);
+        assert_eq!(array.is_null(0), false);
+        assert_eq!(false, value);
+
+        let value = got
+            .value(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(1, value);
+        let value = got
+            .value(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        assert_eq!("string time".to_string(), value);
+
     }
     #[test]
     fn test_map_array() {

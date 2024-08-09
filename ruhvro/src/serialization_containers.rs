@@ -22,26 +22,38 @@ pub fn serialize(schema: &Schema, struct_arry: &ArrayRef) -> GenericBinaryArray<
 }
 
 /// Checks if column should be encoded as an avro union type
-fn is_simple_null_union_type(avro_schema: &Schema) -> Option<usize> {
-    let _ = match avro_schema {
+fn is_simple_null_union_type(avro_schema: &Schema) -> Option<(Option<usize>, bool)> {
+    match avro_schema {
         Schema::Union(us) => {
-            for (idx, schema) in us.variants().iter().enumerate() {
-                if let Schema::Null = schema {
-                    return Some(idx);
-                } else if idx > 1 {
-                    return None;
-                }
+            let null_idx = us.variants().iter().position(|x| matches!(x, Schema::Null));
+            if !null_idx.is_some() {
+                return None;
             }
+
+            let is_simple_null = null_idx.is_some() && us.variants().len() == 2;
+            Some((null_idx, is_simple_null))
         }
-        _ => (),
-    };
-    None
+        _ => None,
+    }
 }
 
 trait ContainerIter {
     fn next_item(&mut self) -> Option<Value>;
     fn next_chunk(&mut self, num_items: i32) -> Vec<Value> {
         (0..num_items).map(|_| self.next_item().unwrap()).collect()
+    }
+}
+
+#[derive(Debug)]
+struct NullArrayContainer;
+impl NullArrayContainer {
+    fn try_new() -> anyhow::Result<Self> {
+        Ok(NullArrayContainer)
+    }
+}
+impl ContainerIter for NullArrayContainer {
+    fn next_item(&mut self) -> Option<Value> {
+        Some(Value::Null)
     }
 }
 
@@ -56,6 +68,7 @@ enum ArrayContainers<'a> {
     TimestampMillisContainer(PrimArrayContainer<&'a PrimitiveArray<TimestampMillisecondType>>),
     UnionContainer(Box<UnionArrayContainer<'a>>),
     MapContainer(Box<MapArrayContainer<'a>>),
+    NullContainer(Box<NullArrayContainer>),
 }
 
 impl<'a> ArrayContainers<'a> {
@@ -67,6 +80,9 @@ impl<'a> ArrayContainers<'a> {
                     inner_arr, schema,
                 )?))
             }
+            Schema::Null => Ok(ArrayContainers::NullContainer(Box::new(
+                NullArrayContainer::try_new()?,
+            ))),
             Schema::Float => {
                 let inner_arr = data.as_primitive::<Float32Type>();
                 Ok(ArrayContainers::FloatContainer(
@@ -119,6 +135,7 @@ impl<'a> ArrayContainers<'a> {
     fn get_next(&mut self) -> Value {
         match self {
             ArrayContainers::IntContainer(ref mut i) => i.next_item().unwrap(),
+            ArrayContainers::NullContainer(ref mut i) => i.next_item().unwrap(),
             ArrayContainers::StringContainer(ref mut i) => i.next_item().unwrap(),
             ArrayContainers::RecordContainer(inner) => inner.next_item().unwrap(),
             ArrayContainers::ListContainer(inner) => inner.next_item().unwrap(),
@@ -149,6 +166,7 @@ impl<'a> ArrayContainers<'a> {
             ArrayContainers::BoolContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::FloatContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::MapContainer(inner) => inner.next_chunk(num_items),
+            ArrayContainers::NullContainer(inner) => inner.next_chunk(num_items),
         }
     }
 }
@@ -306,21 +324,34 @@ impl<'a> ContainerIter for ListArrayContainer<'a> {
 struct NullInfo {
     null_idx: usize,
     non_null_idx: usize,
+    is_simple_null: bool,
 }
 
 impl NullInfo {
     fn try_new(schema: &Schema) -> anyhow::Result<Self> {
         let is_null_loc = is_simple_null_union_type(schema);
         match is_null_loc {
-            Some(null_idx) => {
-                let non_null_idx = if null_idx == 0 { 1usize } else { 0 };
-                Ok(NullInfo {
-                    null_idx,
-                    non_null_idx,
-                })
+            Some((null_idx, is_simple_null)) => {
+                if is_simple_null {
+                    let non_null_idx = if null_idx == Some(0) { 1usize } else { 0 };
+                    Ok(NullInfo {
+                        null_idx: null_idx.unwrap(),
+                        non_null_idx,
+                        is_simple_null,
+                    })
+                } else {
+                    Ok(NullInfo {
+                        null_idx: null_idx.unwrap(),
+                        non_null_idx: 0,
+                        is_simple_null,
+                    })
+                }
             }
             None => Err(anyhow!("Column is not nullable")),
         }
+    }
+    fn check_simple_null(&self) -> bool {
+        self.is_simple_null
     }
 }
 
@@ -337,18 +368,50 @@ impl<'a> UnionArrayContainer<'a> {
         let null_info = NullInfo::try_new(schema).ok();
         // null info only matches on simple null types which would be represented as a null buffer in arrow instead of full UnionArray
         // need to add check to verify that type_ids match between arrow and avro schemas
-        let variants = if let Some(nulls) = &null_info {
-            // if type with null and one col, want to have a single array accessor in variants
-            match schema {
-                Schema::Union(us) => {
-                    let vars = us.variants();
-                    let inner_schema = &vars[nulls.non_null_idx];
-                    (None, vec![ArrayContainers::try_new(data, inner_schema)?])
+
+        match &null_info {
+            Some(nulls) => {
+                if nulls.is_simple_null {
+                    // if type with null and one col, want to have a single array accessor in variants
+                    let inner_schema = match schema {
+                        Schema::Union(us) => {
+                            let vars = us.variants();
+                            &vars[nulls.non_null_idx]
+                        }
+                        _ => panic!("Expected Schema::Union"),
+                    };
+                    let inner_data = ArrayContainers::try_new(data, inner_schema)?;
+                    Ok(UnionArrayContainer {
+                        variants: vec![inner_data],
+                        null_info,
+                        type_ids: None,
+                        current_pos: 0,
+                    })
+                } else {
+                    match schema {
+                        Schema::Union(us) => {
+                            let vars = us.variants();
+                            let mut containers = Vec::with_capacity(vars.len());
+                            let union_arr = data.as_any().downcast_ref::<UnionArray>().unwrap();
+                            let type_ids = union_arr.type_ids();
+                            let _ = us.variants().iter().zip(0..vars.len()).for_each(|(s, i)| {
+                                containers.push(
+                                    ArrayContainers::try_new(union_arr.child(i as i8), s).unwrap(),
+                                )
+                            });
+                            Ok(UnionArrayContainer {
+                                variants: containers,
+                                null_info,
+                                type_ids: Some(type_ids),
+                                current_pos: 0,
+                            })
+                        }
+                        _ => panic!("Expected Schema::Union"),
+                    }
                 }
-                _ => panic!("Expected Schema::Union"),
             }
-        } else {
-            match schema {
+
+            None => match schema {
                 Schema::Union(us) => {
                     let vars = us.variants();
                     let mut containers = Vec::with_capacity(vars.len());
@@ -358,29 +421,74 @@ impl<'a> UnionArrayContainer<'a> {
                         containers
                             .push(ArrayContainers::try_new(union_arr.child(i as i8), s).unwrap())
                     });
-                    (Some(type_ids), containers)
+                    Ok(UnionArrayContainer {
+                        variants: containers,
+                        null_info,
+                        type_ids: Some(type_ids),
+                        current_pos: 0,
+                    })
                 }
                 _ => panic!("Expected Schema::Union"),
-            }
-        };
-        Ok(UnionArrayContainer {
-            variants: variants.1,
-            null_info,
-            type_ids: variants.0,
-            current_pos: 0,
-        })
+            },
+        }
+
+        // let variants = if let Some(nulls) = &null_info {
+        //     // if type with null and one col, want to have a single array accessor in variants
+        //     match schema {
+        //         Schema::Union(us) => {
+        //             let vars = us.variants();
+        //             let inner_schema = &vars[nulls.non_null_idx];
+        //             (None, vec![ArrayContainers::try_new(data, inner_schema)?])
+        //         }
+        //         _ => panic!("Expected Schema::Union"),
+        //     }
+        // } else {
+        //     match schema {
+        //         Schema::Union(us) => {
+        //             let vars = us.variants();
+        //             let mut containers = Vec::with_capacity(vars.len());
+        //             let union_arr = data.as_any().downcast_ref::<UnionArray>().unwrap();
+        //             let type_ids = union_arr.type_ids();
+        //             let _ = us.variants().iter().zip(0..vars.len()).for_each(|(s, i)| {
+        //                 containers
+        //                     .push(ArrayContainers::try_new(union_arr.child(i as i8), s).unwrap())
+        //             });
+        //             (Some(type_ids), containers)
+        //         }
+        //         _ => panic!("Expected Schema::Union"),
+        //     }
+        // };
+        // Ok(UnionArrayContainer {
+        //     variants: variants.1,
+        //     null_info,
+        //     type_ids: variants.0,
+        //     current_pos: 0,
+        // }
+        // )
+    }
+    fn is_simple_null(&self) -> bool {
+        if self.null_info.is_none() {
+            false
+        } else {
+            self.null_info.as_ref().unwrap().check_simple_null()
+        }
     }
 }
 
 impl<'a> ContainerIter for UnionArrayContainer<'a> {
     fn next_item(&mut self) -> Option<Value> {
-        if let Some(nulls) = &self.null_info {
-            let val = self.variants[0].get_next();
-            let v = match &val {
-                Value::Null => Value::Union(nulls.null_idx as u32, Box::new(Value::Null)),
-                _ => Value::Union(nulls.non_null_idx as u32, Box::new(val)),
-            };
-            Some(v)
+        if self.is_simple_null() {
+            if let Some(nulls) = &self.null_info {
+                //     let val = self.variants[0].get_next();
+                let val = self.variants[0].get_next();
+                let v = match &val {
+                    Value::Null => Value::Union(nulls.null_idx as u32, Box::new(Value::Null)),
+                    _ => Value::Union(nulls.non_null_idx as u32, Box::new(val)),
+                };
+                Some(v)
+            } else {
+                unreachable!()
+            }
         } else {
             let current_idx = self.type_ids.unwrap()[self.current_pos];
             let val = self.variants[current_idx as usize].get_next();
@@ -465,14 +573,12 @@ impl ContainerIter for MapArrayContainer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serialization_containers::{
-        ArrayContainers, ContainerIter, MapArrayContainer, PrimArrayContainer, UnionArrayContainer,
-    };
     use apache_avro::schema::{Name, RecordField, RecordFieldOrder, RecordSchema, UnionSchema};
     use apache_avro::types::Value;
     use apache_avro::Schema;
     use arrow::array::{
-        ArrayRef, BooleanArray, Int32Array, MapArray, StringArray, StructArray, UnionArray,
+        ArrayRef, BooleanArray, Int32Array, MapArray, NullArray, StringArray, StructArray,
+        UnionArray,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field, Fields, UnionFields};
@@ -541,7 +647,7 @@ mod tests {
             Arc::new(arr3) as ArrayRef,
         ];
         let union_arr: ArrayRef =
-            Arc::new(UnionArray::try_new(fields, vec![0, 1, 2].into(), None, children).unwrap());
+            Arc::new(UnionArray::try_new(fields, vec![0, 2, 1].into(), None, children).unwrap());
         let mut union_container = UnionArrayContainer::try_new(&union_arr, &schema).unwrap();
 
         let expected_values = vec![
@@ -556,6 +662,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_union_multiple_types_including_null() {
+        let arr1 = Int32Array::from(vec![None, Some(1), None, None]);
+        let arr2 = StringArray::from(vec![None, None, None, Some("def")]);
+        let arr3 = BooleanArray::from(vec![None, None, Some(true), None]);
+
+        let schema = Schema::Union(
+            UnionSchema::new(vec![
+                Schema::Null,
+                Schema::Int,
+                Schema::String,
+                Schema::Boolean,
+            ])
+            .unwrap(),
+        );
+        let fields = UnionFields::new(
+            vec![0, 1, 2, 3],
+            vec![
+                Field::new("null_field", DataType::Null, true),
+                Field::new("int_field", DataType::Int32, true),
+                Field::new("strfield", DataType::Utf8, true),
+                Field::new("bool_field", DataType::Boolean, true),
+            ],
+        );
+        let children: Vec<ArrayRef> = vec![
+            Arc::new(NullArray::new(4)),
+            Arc::new(arr1) as ArrayRef,
+            Arc::new(arr2) as ArrayRef,
+            Arc::new(arr3) as ArrayRef,
+        ];
+        let union_arr: ArrayRef =
+            Arc::new(UnionArray::try_new(fields, vec![0, 1, 3, 2].into(), None, children).unwrap());
+        let mut union_container = UnionArrayContainer::try_new(&union_arr, &schema).unwrap();
+
+        let expected_values = vec![
+            Value::Union(0, Box::new(Value::Null)),
+            Value::Union(1, Box::new(Value::Int(1))),
+            Value::Union(3, Box::new(Value::Boolean(true))),
+            Value::Union(2, Box::new(Value::String("def".into()))),
+        ];
+
+        for (i, expected) in expected_values.iter().enumerate() {
+            let actual = union_container.next_item().unwrap();
+            assert_eq!(*expected, actual, "Mismatch at index {}", i);
+        }
+    }
     #[test]
     fn test_struct_next_chunk() {
         let inside_arr = Arc::new(Int32Array::from(vec![13, 2]));
@@ -640,4 +792,34 @@ mod tests {
         assert_eq!(Value::Union(0, Box::new(Value::Null)), r2);
     }
     //
+    #[test]
+    fn test_null_info_simple_union() {
+        let union_schema = Schema::Union(
+            apache_avro::schema::UnionSchema::new(vec![Schema::Null, Schema::Int]).unwrap(),
+        );
+        let result = NullInfo::try_new(&union_schema).unwrap();
+        assert_eq!(result.null_idx, 0);
+        assert_eq!(result.non_null_idx, 1);
+        assert_eq!(result.is_simple_null, true);
+    }
+
+    #[test]
+    fn test_null_info_complex_union() {
+        let union_schema = Schema::Union(
+            apache_avro::schema::UnionSchema::new(vec![Schema::Null, Schema::Int, Schema::String])
+                .unwrap(),
+        );
+        let result = NullInfo::try_new(&union_schema).unwrap();
+        assert_eq!(result.null_idx, 0);
+        assert_eq!(result.non_null_idx, 0);
+        assert_eq!(result.is_simple_null, false);
+    }
+    #[test]
+    fn test_null_info_no_nulls() {
+        let union_schema = Schema::Union(
+            apache_avro::schema::UnionSchema::new(vec![Schema::Int, Schema::String]).unwrap(),
+        );
+        let result = NullInfo::try_new(&union_schema);
+        assert!(result.is_err());
+    }
 }
