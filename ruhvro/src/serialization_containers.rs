@@ -7,7 +7,7 @@ use arrow::array::{
     PrimitiveArray, StructArray, UnionArray,
 };
 use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
-use arrow::datatypes::{Float32Type, Int32Type, TimestampMillisecondType};
+use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type, TimestampMillisecondType};
 use std::collections::HashMap;
 
 pub fn serialize(schema: &Schema, struct_arry: &ArrayRef) -> GenericBinaryArray<i32> {
@@ -69,6 +69,9 @@ enum ArrayContainers<'a> {
     UnionContainer(Box<UnionArrayContainer<'a>>),
     MapContainer(Box<MapArrayContainer<'a>>),
     NullContainer(Box<NullArrayContainer>),
+    EnumContainer(Box<EnumArrayContainer<'a>>),
+    DoubleContainer(PrimArrayContainer<&'a PrimitiveArray<Float64Type>>),
+    LongContainer(PrimArrayContainer<&'a PrimitiveArray<Int64Type>>),
 }
 
 impl<'a> ArrayContainers<'a> {
@@ -80,12 +83,24 @@ impl<'a> ArrayContainers<'a> {
                     inner_arr, schema,
                 )?))
             }
+            Schema::Long => {
+                let inner_arr = data.as_primitive::<Int64Type>();
+                Ok(ArrayContainers::LongContainer(PrimArrayContainer::try_new(
+                    inner_arr, schema,
+                )?))
+            }
             Schema::Null => Ok(ArrayContainers::NullContainer(Box::new(
                 NullArrayContainer::try_new()?,
             ))),
             Schema::Float => {
                 let inner_arr = data.as_primitive::<Float32Type>();
                 Ok(ArrayContainers::FloatContainer(
+                    PrimArrayContainer::try_new(inner_arr, schema)?,
+                ))
+            }
+            Schema::Double => {
+                let inner_arr = data.as_primitive::<Float64Type>();
+                Ok(ArrayContainers::DoubleContainer(
                     PrimArrayContainer::try_new(inner_arr, schema)?,
                 ))
             }
@@ -106,6 +121,12 @@ impl<'a> ArrayContainers<'a> {
                 Ok(ArrayContainers::StringContainer(
                     PrimArrayContainer::try_new(inner_arr, schema)?,
                 ))
+            }
+            Schema::Enum(_) => {
+                let inner_arr = data;
+                Ok(ArrayContainers::EnumContainer(Box::new(
+                    EnumArrayContainer::try_new(inner_arr, schema)?,
+                )))
             }
             Schema::Record(_) => {
                 let inner_arr = data.as_struct();
@@ -152,6 +173,9 @@ impl<'a> ArrayContainers<'a> {
             ArrayContainers::BoolContainer(inner) => inner.next_item().unwrap(),
             ArrayContainers::FloatContainer(inner) => inner.next_item().unwrap(),
             ArrayContainers::MapContainer(inner) => inner.next_item().unwrap(),
+            ArrayContainers::EnumContainer(inner) => inner.next_item().unwrap(),
+            ArrayContainers::DoubleContainer(inner) => inner.next_item().unwrap(),
+            ArrayContainers::LongContainer(inner) => inner.next_item().unwrap(),
         }
     }
 
@@ -167,6 +191,9 @@ impl<'a> ArrayContainers<'a> {
             ArrayContainers::FloatContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::MapContainer(inner) => inner.next_chunk(num_items),
             ArrayContainers::NullContainer(inner) => inner.next_chunk(num_items),
+            ArrayContainers::EnumContainer(inner) => inner.next_chunk(num_items),
+            ArrayContainers::DoubleContainer(inner) => inner.next_chunk(num_items),
+            ArrayContainers::LongContainer(inner) => inner.next_chunk(num_items),
         }
     }
 }
@@ -431,41 +458,8 @@ impl<'a> UnionArrayContainer<'a> {
                 _ => panic!("Expected Schema::Union"),
             },
         }
-
-        // let variants = if let Some(nulls) = &null_info {
-        //     // if type with null and one col, want to have a single array accessor in variants
-        //     match schema {
-        //         Schema::Union(us) => {
-        //             let vars = us.variants();
-        //             let inner_schema = &vars[nulls.non_null_idx];
-        //             (None, vec![ArrayContainers::try_new(data, inner_schema)?])
-        //         }
-        //         _ => panic!("Expected Schema::Union"),
-        //     }
-        // } else {
-        //     match schema {
-        //         Schema::Union(us) => {
-        //             let vars = us.variants();
-        //             let mut containers = Vec::with_capacity(vars.len());
-        //             let union_arr = data.as_any().downcast_ref::<UnionArray>().unwrap();
-        //             let type_ids = union_arr.type_ids();
-        //             let _ = us.variants().iter().zip(0..vars.len()).for_each(|(s, i)| {
-        //                 containers
-        //                     .push(ArrayContainers::try_new(union_arr.child(i as i8), s).unwrap())
-        //             });
-        //             (Some(type_ids), containers)
-        //         }
-        //         _ => panic!("Expected Schema::Union"),
-        //     }
-        // };
-        // Ok(UnionArrayContainer {
-        //     variants: variants.1,
-        //     null_info,
-        //     type_ids: variants.0,
-        //     current_pos: 0,
-        // }
-        // )
     }
+
     fn is_simple_null(&self) -> bool {
         if self.null_info.is_none() {
             false
@@ -570,10 +564,54 @@ impl ContainerIter for MapArrayContainer<'_> {
     }
 }
 
+#[derive(Debug)]
+struct EnumArrayContainer<'a> {
+    inner_data: ArrayContainers<'a>,
+    mapping: HashMap<String, i32>,
+}
+
+impl<'a> EnumArrayContainer<'a> {
+    fn try_new(data: &'a ArrayRef, schema: &Schema) -> anyhow::Result<Self> {
+        let mapping = if let Schema::Enum(es) = schema {
+            let mut m: HashMap<String, i32> = HashMap::new();
+            es.symbols.iter().enumerate().for_each(|(i, s)| {
+                m.insert(s.clone(), i as i32);
+            });
+            m
+        } else {
+            panic!("Expected enum schema")
+        };
+        let modified_schema = Schema::String;
+        let inner_data = ArrayContainers::try_new(data, &modified_schema)?;
+        Ok(EnumArrayContainer {
+            inner_data,
+            mapping,
+        })
+    }
+}
+
+impl ContainerIter for EnumArrayContainer<'_> {
+    fn next_item(&mut self) -> Option<Value> {
+        let val = self.inner_data.get_next();
+        match val {
+            Value::String(s) => {
+                let idx = self
+                    .mapping
+                    .get(&s)
+                    .unwrap_or_else(|| panic!("Did not find string in mapping"));
+                Some(Value::Enum(*idx as u32, s))
+            }
+            _ => panic!("Expected string value"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apache_avro::schema::{Name, RecordField, RecordFieldOrder, RecordSchema, UnionSchema};
+    use apache_avro::schema::{
+        EnumSchema, Name, RecordField, RecordFieldOrder, RecordSchema, UnionSchema,
+    };
     use apache_avro::types::Value;
     use apache_avro::Schema;
     use arrow::array::{
@@ -583,7 +621,31 @@ mod tests {
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field, Fields, UnionFields};
     use std::sync::Arc;
-
+    #[test]
+    fn test_enum_container() {
+        let arr: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "c"]));
+        let schema = Schema::Enum(EnumSchema {
+            name: Name {
+                name: "enum".to_owned(),
+                namespace: None,
+            },
+            aliases: None,
+            doc: None,
+            symbols: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            default: None,
+            attributes: Default::default(),
+        });
+        let mut enum_container = EnumArrayContainer::try_new(&arr, &schema).unwrap();
+        let expected_values = vec![
+            Value::Enum(0, "a".to_string()),
+            Value::Enum(1, "b".to_string()),
+            Value::Enum(2, "c".to_string()),
+        ];
+        for (i, expected) in expected_values.iter().enumerate() {
+            let actual = enum_container.next_item().unwrap();
+            assert_eq!(*expected, actual, "Mismatch at index {}", i);
+        }
+    }
     #[test]
     fn test_map_container() {
         // Setup the necessary data
