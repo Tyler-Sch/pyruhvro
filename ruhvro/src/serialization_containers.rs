@@ -45,19 +45,6 @@ trait ContainerIter {
 }
 
 #[derive(Debug)]
-struct NullArrayContainer;
-impl NullArrayContainer {
-    fn try_new() -> anyhow::Result<Self> {
-        Ok(NullArrayContainer)
-    }
-}
-impl ContainerIter for NullArrayContainer {
-    fn next_item(&mut self) -> Option<Value> {
-        Some(Value::Null)
-    }
-}
-
-#[derive(Debug)]
 enum ArrayContainers<'a> {
     BoolContainer(PrimArrayContainer<&'a BooleanArray>),
     FloatContainer(PrimArrayContainer<&'a Float32Array>),
@@ -229,6 +216,19 @@ where
                 panic!("Tried to consume past end of array")
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct NullArrayContainer;
+impl NullArrayContainer {
+    fn try_new() -> anyhow::Result<Self> {
+        Ok(NullArrayContainer)
+    }
+}
+impl ContainerIter for NullArrayContainer {
+    fn next_item(&mut self) -> Option<Value> {
+        Some(Value::Null)
     }
 }
 

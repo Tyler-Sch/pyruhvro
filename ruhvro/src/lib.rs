@@ -154,9 +154,8 @@ mod tests {
         let newv = vec![&encoded[..], &encoded2[..], &encoded3[..]];
         let result = per_datum_deserialize(&newv, &parsed_schema);
 
-        println!("{:?}", result);
         let serialized = crate::serialize::serialize_record_batch(result, &parsed_schema, 1);
-        println!("{:?}", serialized);
+
     }
 
     pub fn decode_hex(s: &str) -> Vec<u8> {
@@ -166,7 +165,3 @@ mod tests {
             .collect::<Vec<_>>()
     }
 }
-
-// TODO: Add logic to deal with Null column in sparse union array
-// TODO: Assert null logic in deserialization and serialization of maps
-// TODO: refactor serialization
