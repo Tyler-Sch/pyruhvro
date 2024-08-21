@@ -3,6 +3,8 @@ from fastavro.schema import load_schema
 import io
 from faker import Faker
 import random
+from pyruhvro import deserialize_array_threaded, serialize_record_batch
+import json
 
 # Initialize Faker
 fake = Faker()
@@ -60,41 +62,69 @@ def generate_random_record():
         "class": random.choice(["A", "B", "C"])
     }
 
+def get_serialized_records(records):
+    result = []
+    for i in records:
+        output = io.BytesIO()
+        fastavro.schemaless_writer(output, parsed_schema, i)
+        result.append(output.getvalue())
+    return result
+
+def generate_records(num_records):
+    return [generate_random_record() for _ in range(num_records)]
+
 # Create 100,000 example data records
-records = [generate_random_record() for _ in range(25000)]
+# records = [generate_random_record() for _ in range(10000)]
 
 parsed_schema = fastavro.parse_schema(schema)
-# Serialize the records to Avro format
+schema_string = json.dumps(schema)
 
-import time
-start = time.time()
-print("Serializing data with fastavro")
-result = []
-for i in records:
-    output = io.BytesIO()
-    fastavro.schemaless_writer(output, parsed_schema, i)
-    result.append(output.getvalue())
 
-end = time.time()
-print(f"fastavro took {end - start} seconds to serialize {len(records)} records")
 
-from pyruhvro import deserialize_array_threaded, serialize_record_batch
-import json
-start = time.time()
-deserilized = deserialize_array_threaded(result, json.dumps(schema), 24)
-end = time.time()
-print(f"pyruhvro took {end - start} seconds to deserialize {len(records)} records")
+def deserialize_fast_avro(records, schema):
+    a = [fastavro.schemaless_reader(io.BytesIO(i), schema) for i in records]
+    return a
+
+def deserialize_pyruhvro(records, schema):
+    return deserialize_array_threaded(records, schema, 8)
+
+def serialize_pyruhvro(records, schema):
+    return [serialize_record_batch(r, schema, 8) for r in records]
+
+def serialize_fastavro(records, schema):
+    result = []
+    for i in records:
+        output = io.BytesIO()
+        fastavro.schemaless_writer(output, schema, i)
+        result.append(output.getvalue())
+    return result
+
+
+if __name__ == "__main__":
+    import time
+    records = generate_records(20000)
+    parsed_schmea = fastavro.parse_schema(schema)
+    start = time.time()
+    serialized_records = serialize_fastavro(records, parsed_schema)
+    end = time.time()
+
+    print(f"fastavro took {end - start} seconds to serialize {len(serialized_records)} records")
+    list_record_batches = deserialize_pyruhvro(serialized_records, schema_string)
+
+
+# from pyruhvro import deserialize_array_threaded, serialize_record_batch
+# import json
+    start = time.time()
+    deserilized = deserialize_array_threaded(serialized_records, json.dumps(schema), 8)
+    end = time.time()
+    print(f"pyruhvro took {end - start} seconds to deserialize {len(serialized_records)} records")
 #
-start = time.time()
-deserialized_fastavro = [fastavro.schemaless_reader(io.BytesIO(i), parsed_schema) for i in result]
-end = time.time()
-print(f"fastavro took {end - start} seconds to deserialize {len(records)} records")
-# savedd
-# Get the serialized data
+    start = time.time()
+    deserialized_fastavro = [fastavro.schemaless_reader(io.BytesIO(i), parsed_schema) for i in serialized_records]
+    end = time.time()
+    print(f"fastavro took {end - start} seconds to deserialize {len(serialized_records)} records")
 
-# print(result)
-start = time.time()
-serialized = [serialize_record_batch(r, json.dumps(schema), 24) for r in deserilized]
-end = time.time()
-print(f"pyruhvro took {end - start} seconds to serialize {len(records)} records")
-# Print the size of the serialized data
+    start = time.time()
+    serialized = [serialize_record_batch(r, json.dumps(schema), 24) for r in deserilized]
+    end = time.time()
+    print(f"pyruhvro took {end - start} seconds to serialize {len(serialized_records)} records")
