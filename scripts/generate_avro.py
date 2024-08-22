@@ -1,5 +1,4 @@
 import fastavro
-from fastavro.schema import load_schema
 import io
 from faker import Faker
 import random
@@ -73,8 +72,6 @@ def get_serialized_records(records):
 def generate_records(num_records):
     return [generate_random_record() for _ in range(num_records)]
 
-# Create 100,000 example data records
-# records = [generate_random_record() for _ in range(10000)]
 
 parsed_schema = fastavro.parse_schema(schema)
 schema_string = json.dumps(schema)
@@ -107,18 +104,15 @@ if __name__ == "__main__":
     start = time.time()
     serialized_records = serialize_fastavro(records, parsed_schema)
     end = time.time()
-
     print(f"fastavro took {end - start} seconds to serialize {len(serialized_records)} records")
-    list_record_batches = deserialize_pyruhvro(serialized_records, schema_string)
 
+    # list_record_batches = deserialize_pyruhvro(serialized_records, schema_string)
 
-# from pyruhvro import deserialize_array_threaded, serialize_record_batch
-# import json
     start = time.time()
     deserilized = deserialize_array_threaded(serialized_records, json.dumps(schema), 8)
     end = time.time()
     print(f"pyruhvro took {end - start} seconds to deserialize {len(serialized_records)} records")
-#
+
     start = time.time()
     deserialized_fastavro = [fastavro.schemaless_reader(io.BytesIO(i), parsed_schema) for i in serialized_records]
     end = time.time()

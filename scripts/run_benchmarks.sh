@@ -1,5 +1,6 @@
+# num records to generate
 NUM_RECORDS=10000
-SETUP="import generate_avro; import io; records = generate_avro.generate_records($NUM_RECORDS);serialized_records=generate_avro.get_serialized_records(records);list_record_batches = generate_avro.deserialize_pyruhvro(serialized_records, generate_avro.schema_string);"
+SETUP="from pyruhvro import deserialize_array_threaded, serialize_record_batch; import generate_avro; import io; records = generate_avro.generate_records($NUM_RECORDS);serialized_records=generate_avro.get_serialized_records(records);list_record_batches = generate_avro.deserialize_pyruhvro(serialized_records, generate_avro.schema_string);"
 
 echo "Running benchmarks..."
 echo "Running pyruhvro serialize"
