@@ -2,8 +2,9 @@
 name = "ruhvro"
 version = "0.2.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+keywords = ["avro", "arrow", "kafka"]
+description = "Fast, multi-threaded deserialization of schema-less avro encoded messages"
+repository = "https://github.com/Tyler-Sch/pyruhvro"
 
 [dependencies]
 rayon = "1.9.0"
