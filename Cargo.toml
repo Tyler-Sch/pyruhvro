@@ -12,6 +12,7 @@ members = [
 name = "pyruhvro"
 version = "0.2.0"
 edition = "2021"
+license = "MIT"
 keywords = ["avro", "arrow", "kafka"]
 description = "Fast, multi-threaded deserialization of schema-less avro encoded messages"
 repository = "https://github.com/Tyler-Sch/pyruhvro"
