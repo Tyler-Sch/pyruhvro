@@ -32,8 +32,14 @@ mod complex;
 /// // and serialize it
 /// let serialized = apache_avro::to_avro_datum(&parsed_schema, record).unwrap();
 /// // verify deserialization
-/// let result = ruhvro::deserialize::per_datum_deserialize(&vec![&serialized[..]], &parsed_schema);
-/// println!("{:?}", result);
+/// let deserialized = ruhvro::deserialize::per_datum_deserialize(&vec![&serialized[..]], &parsed_schema);
+/// println!("{:?}", deserialized);
+///
+/// // serialize the record batch
+/// let serialized = ruhvro::serialize::serialize_record_batch(deserialized, &parsed_schema, 1);
+/// println!("{:?}", serialized);
+///
+///
 ///```
 pub mod deserialize;
 mod schema_translate;
