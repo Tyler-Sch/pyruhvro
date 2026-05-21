@@ -30,8 +30,24 @@ pip install fastavro
 pip install pyarrow
 
 cd scripts
-bash benchmark.sh
+bash run_benchmarks.sh
 ```
+
+### Rust microbenchmarks (`ruhvro` crate)
+
+For lower-noise measurements of the core Rust code (no Python interop), the
+`ruhvro` crate has criterion benches covering both directions across several
+schema shapes:
+
+```sh
+cargo bench -p ruhvro                                  # everything
+cargo bench -p ruhvro --bench deserialize              # deserialize only
+cargo bench -p ruhvro --bench serialize                # serialize only
+```
+
+HTML reports land in `target/criterion/report/index.html`. See
+[`ruhvro/README.md`](ruhvro/README.md#benchmarks) for the full list of benches
+and profiling tips.
 
 ## Usage
 see scripts/generate_avro.py for a working example
