@@ -3,6 +3,12 @@
 codegen-units = 1
 lto = "fat"
 
+# Profile used by `cargo bench`. Keeps release-level optimizations but adds
+# line-tables debug info so profilers (samply, cargo flamegraph) can
+# symbolicate the bench binaries.
+[profile.bench]
+debug = "line-tables-only"
+
 [workspace]
 members = [
     "ruhvro",

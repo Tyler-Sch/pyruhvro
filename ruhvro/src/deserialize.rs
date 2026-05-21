@@ -55,6 +55,13 @@ pub fn per_datum_deserialize_threaded(
     num_chunks: usize,
 ) -> Result<Vec<RecordBatch>> {
     let use_fast = fast_decode::is_supported(schema);
+    // Compute the Arrow schema once and share it across all chunks — avoids
+    // an `to_arrow_schema` walk per chunk on the fast path.
+    let arrow_schema = if use_fast {
+        Some(Arc::new(to_arrow_schema(schema)?))
+    } else {
+        None
+    };
     let arr = Arc::new(BinaryArray::from_vec(data));
     let mut slices = vec![];
     let cores = num_chunks;
@@ -74,7 +81,11 @@ pub fn per_datum_deserialize_threaded(
                 .map(|x| x.ok_or_else(|| anyhow!("Error getting sliced data")))
                 .collect::<Result<Vec<_>>>()?;
             if use_fast {
-                fast_decode::decode(&chunk_refs, schema)
+                fast_decode::decode_with_arrow_schema(
+                    &chunk_refs,
+                    schema,
+                    arrow_schema.as_ref().unwrap(),
+                )
             } else {
                 per_datum_deserialize_baseline(&chunk_refs, schema)
             }
