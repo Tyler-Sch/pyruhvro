@@ -31,6 +31,7 @@ pub fn serialize_record_batch(
     schema: &Schema,
     num_chunks: usize,
 ) -> Result<Vec<GenericBinaryArray<i32>>> {
+    let use_fast = crate::fast_encode::is_supported(schema);
     let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
     let chunk_size = struct_arry.len() / num_chunks;
     let slices: Vec<_> = (0..num_chunks)
@@ -42,7 +43,16 @@ pub fn serialize_record_batch(
             }
         })
         .collect();
-    slices.par_iter().map(|x| serialization_containers::serialize(schema, x)).collect()
+    slices
+        .par_iter()
+        .map(|x| {
+            if use_fast {
+                crate::fast_encode::serialize_chunk(schema, x)
+            } else {
+                serialization_containers::serialize(schema, x)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
