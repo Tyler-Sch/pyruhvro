@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use apache_avro::schema::{Alias, DecimalSchema, EnumSchema, FixedSchema, Name, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
@@ -58,13 +58,13 @@ fn schema_to_field_with_props(
         AvroSchema::Bytes => DataType::Binary,
         AvroSchema::String => DataType::Utf8,
         AvroSchema::Array(item_schema) => DataType::List(Arc::new(schema_to_field_with_props(
-            item_schema,
+            &item_schema.items,
             Some("item"),
             true,
             None,
         )?)),
         AvroSchema::Map(value_schema) => {
-            let value_field = schema_to_field_with_props(value_schema, Some("values"), false, None)?;
+            let value_field = schema_to_field_with_props(&value_schema.types, Some("values"), false, None)?;
             let key_field = Field::new("keys", DataType::Utf8, false);
             let map_field = Arc::new(Field::new(
                 "entries",
@@ -89,9 +89,12 @@ fn schema_to_field_with_props(
                         .data_type()
                         .clone()
                 } else {
-                    return Err(anyhow::Error::from(apache_avro::Error::GetUnionDuplicate));
+                    return Err(anyhow!("Avro union contains duplicate null variants"));
                 }
             } else {
+                if has_nullable {
+                    nullable = true;
+                }
                 let fields = sub_schemas
                     .iter()
                     .map(|s| schema_to_field_with_props(s, None, true, None))

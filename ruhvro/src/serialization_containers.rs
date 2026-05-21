@@ -325,7 +325,7 @@ impl<'a> ListArrayContainer<'a> {
         let offsets = data.offsets();
         let inner = data.values();
         let inner_schema = if let Schema::Array(s) = schema {
-            s
+            &s.items
         } else {
             panic!("{}", format!("Expected list schema got {:?}", schema))
         };
@@ -525,7 +525,7 @@ impl<'a> MapArrayContainer<'a> {
         let keys = data.keys();
         let inner = data.values();
         let inner_schema = if let Schema::Map(s) = schema {
-            s
+            &s.types
         } else {
             panic!("{}", format!("Expected map schema got {:?}", schema))
         };
@@ -667,7 +667,10 @@ mod tests {
         let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3, 4]));
         let entry_offsets = [0, 2, 4];
         let map_array = MapArray::new_from_strings(keys, &values, &entry_offsets).unwrap();
-        let schema = Schema::Map(Box::new(Schema::Int));
+        let schema = Schema::Map(apache_avro::schema::MapSchema {
+            types: Box::new(Schema::Int),
+            attributes: Default::default(),
+        });
 
         // Call the try_new function
         let result = MapArrayContainer::try_new(&map_array, &schema);
