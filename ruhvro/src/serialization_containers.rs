@@ -10,15 +10,15 @@ use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type, TimestampMillisecondType};
 use std::collections::HashMap;
 
-pub fn serialize(schema: &Schema, struct_arry: &ArrayRef) -> GenericBinaryArray<i32> {
-    let mut arr_container = ArrayContainers::try_new(struct_arry, schema).unwrap();
+pub fn serialize(schema: &Schema, struct_arry: &ArrayRef) -> anyhow::Result<GenericBinaryArray<i32>> {
+    let mut arr_container = ArrayContainers::try_new(struct_arry, schema)?;
     let mut builder = GenericBinaryBuilder::new();
     (0..struct_arry.len()).for_each(|_| {
         let val = arr_container.get_next();
         let serialized = to_avro_datum(schema, val).unwrap();
         builder.append_value(serialized);
     });
-    builder.finish()
+    Ok(builder.finish())
 }
 
 /// Checks if column should be encoded as an avro union type
@@ -245,20 +245,33 @@ impl<'a> StructArrayContainer<'a> {
         let mut column_names = vec![];
         let inner_arrays: anyhow::Result<Vec<ArrayContainers>> = if let Schema::Record(rs) = schema
         {
-            let schemas = &rs.fields;
-            (0..schemas.len())
-                .map(|idx| {
-                    column_names.push(String::from(&schemas[idx].name));
-                    Ok(ArrayContainers::try_new(
-                        data.column(idx),
-                        &schemas[idx].schema,
-                    )?)
+            let arrow_name_to_idx: HashMap<&str, usize> = data
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.name().as_str(), i))
+                .collect();
+            rs.fields
+                .iter()
+                .map(|avro_field| {
+                    let arrow_idx = arrow_name_to_idx
+                        .get(avro_field.name.as_str())
+                        .ok_or_else(|| {
+                            let available: Vec<&str> =
+                                data.fields().iter().map(|f| f.name().as_str()).collect();
+                            anyhow!(
+                                "Arrow struct missing column '{}' required by Avro schema. Available columns: {:?}",
+                                avro_field.name,
+                                available
+                            )
+                        })?;
+                    column_names.push(avro_field.name.clone());
+                    ArrayContainers::try_new(data.column(*arrow_idx), &avro_field.schema)
                 })
                 .collect()
         } else {
             panic!("Expected record schema");
         };
-        // let null_buff = None;
         let null_buff = data.nulls();
         Ok(StructArrayContainer {
             data: inner_arrays?,

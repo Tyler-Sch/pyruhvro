@@ -33,11 +33,11 @@ fn main() {
     let serialized = apache_avro::to_avro_datum(&parsed_schema, record).unwrap();
     
     // deserialization
-     let deserialized = ruhvro::deserialize::per_datum_deserialize(&vec![&serialized[..]], &parsed_schema);
+     let deserialized = ruhvro::deserialize::per_datum_deserialize(&vec![&serialized[..]], &parsed_schema).unwrap();
      println!("{:?}", deserialized);
     
      // serialize the record batch
-     let serialized = ruhvro::serialize::serialize_record_batch(deserialized, &parsed_schema, 1);
+     let serialized = ruhvro::serialize::serialize_record_batch(deserialized, &parsed_schema, 1).unwrap();
      println!("{:?}", serialized);
 }
 ```

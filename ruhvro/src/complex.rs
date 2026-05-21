@@ -680,7 +680,6 @@ mod tests {
     }
     #[test]
     fn test_map_array() {
-        // fix asserts. Map values can return different order so test will fail 50% of the time
         let k_field = Field::new("keys", DataType::Utf8, false);
         let v_field = Field::new("values", DataType::Int32, false);
         let struct_field = Arc::new(Field::new(
@@ -708,10 +707,15 @@ mod tests {
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        let expected_keys = StringArray::from(vec!["my_key", "second"]);
-        let expected_values = Int32Array::from(vec![1, 3]);
-        assert_eq!(key_result, &expected_keys);
-        assert_eq!(value_result, &expected_values);
+        // HashMap iteration order is non-deterministic, but key↔value pairing
+        // must be preserved. Sort pairs by key before comparing.
+        let mut actual: Vec<(&str, i32)> = key_result
+            .iter()
+            .zip(value_result.iter())
+            .map(|(k, v)| (k.unwrap(), v.unwrap()))
+            .collect();
+        actual.sort_by_key(|(k, _)| *k);
+        assert_eq!(actual, vec![("my_key", 1), ("second", 3)]);
     }
     #[test]
     fn test_nested_struct() {

@@ -25,7 +25,8 @@ fn deserialize_array(list: &Bound<'_, PyList>, schema: &str) -> PyResult<PyArrow
     let parsed_schema = deserialize::parse_schema(schema).map_err(to_py_err)?;
     let owned = extract_bytes_list(list)?;
     let borrow_list: Vec<&[u8]> = owned.iter().map(|b| &b[..]).collect();
-    let record_batch = deserialize::per_datum_deserialize(&borrow_list, &parsed_schema);
+    let record_batch =
+        deserialize::per_datum_deserialize(&borrow_list, &parsed_schema).map_err(to_py_err)?;
     Ok(PyArrowType(record_batch))
 }
 
@@ -39,7 +40,8 @@ fn deserialize_array_threaded(
     let owned = extract_bytes_list(list)?;
     let borrow_list: Vec<&[u8]> = owned.iter().map(|b| &b[..]).collect();
     let record_batches =
-        deserialize::per_datum_deserialize_threaded(borrow_list, &parsed_schema, num_chunks);
+        deserialize::per_datum_deserialize_threaded(borrow_list, &parsed_schema, num_chunks)
+            .map_err(to_py_err)?;
     Ok(record_batches.into_iter().map(PyArrowType).collect())
 }
 
@@ -50,7 +52,8 @@ fn serialize_record_batch(
     num_chunks: usize,
 ) -> PyResult<Vec<PyArrowType<ArrayData>>> {
     let parsed_schema = deserialize::parse_schema(schema).map_err(to_py_err)?;
-    let serialized = serialize::serialize_record_batch(data.0, &parsed_schema, num_chunks);
+    let serialized = serialize::serialize_record_batch(data.0, &parsed_schema, num_chunks)
+        .map_err(to_py_err)?;
     Ok(serialized
         .into_iter()
         .map(|x| PyArrowType(x.into_data()))

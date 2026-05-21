@@ -5,6 +5,7 @@ use arrow::array::{
 use rayon::prelude::*;
 use std::sync::Arc;
 use crate::serialization_containers;
+use anyhow::Result;
 // TODO: Should be checks to make sure avro and arrow schema match
 // TODO: need to figure out names. Should serialize match by name or position?
 // TODO: Should it include namespace in matching?
@@ -29,7 +30,7 @@ pub fn serialize_record_batch(
     rb: RecordBatch,
     schema: &Schema,
     num_chunks: usize,
-) -> Vec<GenericBinaryArray<i32>> {
+) -> Result<Vec<GenericBinaryArray<i32>>> {
     let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
     let chunk_size = struct_arry.len() / num_chunks;
     let slices: Vec<_> = (0..num_chunks)
@@ -139,14 +140,14 @@ mod test {
         let schema = Schema::parse_str(avro_schema).unwrap();
         // let struct_arr_ref: ArrayRef = Arc::new(struct_arr);
         let struct_arr_ref: RecordBatch = struct_arr.into();
-        let r = serialize_record_batch(struct_arr_ref.clone(), &schema, 1);
+        let r = serialize_record_batch(struct_arr_ref.clone(), &schema, 1).unwrap();
         let ra = r
             .iter()
             .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
             .collect::<Vec<_>>();
 
         //
-        let deserialize = crate::deserialize::per_datum_deserialize(&ra[0], &schema);
+        let deserialize = crate::deserialize::per_datum_deserialize(&ra[0], &schema).unwrap();
         let rb = struct_arr_ref;
         assert_eq!(deserialize, rb);
     }
@@ -197,12 +198,12 @@ mod test {
         );
         let arr: RecordBatch = outer_struct_arr.into();
         let parsed_schmea = Schema::parse_str(schmea).unwrap();
-        let arr_cont = serialize_record_batch(arr.clone(), &parsed_schmea, 1);
+        let arr_cont = serialize_record_batch(arr.clone(), &parsed_schmea, 1).unwrap();
         let ra = arr_cont
             .iter()
             .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        let deserialized = crate::deserialize::per_datum_deserialize(&ra[0], &parsed_schmea);
+        let deserialized = crate::deserialize::per_datum_deserialize(&ra[0], &parsed_schmea).unwrap();
         // assert_eq!(arr, deserialized);
     }
     #[test]
@@ -244,12 +245,12 @@ mod test {
         let schema = Schema::parse_str(schema).unwrap();
         let record_arr_ref: RecordBatch = record_arr.into();
         println!("{:?}", record_arr_ref);
-        let r = serialize_record_batch(record_arr_ref.clone(), &schema, 1);
+        let r = serialize_record_batch(record_arr_ref.clone(), &schema, 1).unwrap();
         let ra = r
             .iter()
             .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        let deserialized = crate::deserialize::per_datum_deserialize(&ra[0], &schema);
+        let deserialized = crate::deserialize::per_datum_deserialize(&ra[0], &schema).unwrap();
         assert_eq!(record_arr_ref, deserialized);
     }
 
@@ -301,5 +302,68 @@ mod test {
         // let arr: ArrayRef = Arc::new(outer_struct_arr);
         // let parsed_schmea = Schema::parse_str(schmea).unwrap();
         // let arr_cont = serialize_record_batch(arr.clone(), &parsed_schmea, 1);
+    }
+
+    #[test]
+    fn test_serialize_matches_columns_by_name() {
+        // Arrow RecordBatch has columns in a different order than the Avro schema.
+        // Serialization should still succeed and produce the same bytes as if they
+        // matched the schema order, because matching is now by name.
+        let schema_str = r#"
+            {
+                "type": "record",
+                "name": "test",
+                "fields": [
+                    {"name": "a", "type": "int"},
+                    {"name": "b", "type": "string"}
+                ]
+            }
+        "#;
+        let parsed = Schema::parse_str(schema_str).unwrap();
+
+        let a_arr: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let b_arr: ArrayRef = Arc::new(StringArray::from(vec!["x", "y", "z"]));
+
+        // Build in (a, b) order — matches schema.
+        let in_order = RecordBatch::try_from_iter(vec![
+            ("a", a_arr.clone()),
+            ("b", b_arr.clone()),
+        ]).unwrap();
+        // Build in (b, a) order — reversed relative to schema.
+        let reversed = RecordBatch::try_from_iter(vec![
+            ("b", b_arr.clone()),
+            ("a", a_arr.clone()),
+        ]).unwrap();
+
+        let in_order_bytes = serialize_record_batch(in_order, &parsed, 1).unwrap();
+        let reversed_bytes = serialize_record_batch(reversed, &parsed, 1).unwrap();
+
+        assert_eq!(in_order_bytes.len(), reversed_bytes.len());
+        for (a, b) in in_order_bytes.iter().zip(reversed_bytes.iter()) {
+            assert_eq!(a.value_data(), b.value_data());
+        }
+    }
+
+    #[test]
+    fn test_serialize_errors_on_missing_column() {
+        let schema_str = r#"
+            {
+                "type": "record",
+                "name": "test",
+                "fields": [
+                    {"name": "a", "type": "int"},
+                    {"name": "b", "type": "string"}
+                ]
+            }
+        "#;
+        let parsed = Schema::parse_str(schema_str).unwrap();
+
+        // Only one of the two required columns is present.
+        let a_arr: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let batch = RecordBatch::try_from_iter(vec![("a", a_arr)]).unwrap();
+
+        let err = serialize_record_batch(batch, &parsed, 1).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("missing column 'b'"), "unexpected error: {msg}");
     }
 }
