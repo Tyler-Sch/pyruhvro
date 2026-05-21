@@ -4,24 +4,39 @@ record batches. This library was created as
 an experiment to gauge potential improvements in kafka messages deserialization speed - particularly from the python
 ecosystem. 
 
-The main speed-ups in this code are from releasing python's gil during deserialization
-and the use of multiple cores. The speed-ups are much more noticeable on larger datasets or more complex avro schemas.
+The main speed-ups come from:
+1. A **fast direct-decode/encode path** that walks Avro bytes and Arrow builders
+   together, skipping `apache_avro::types::Value` tree construction entirely.
+   This supports primitives, logical types (date, timestamp-millis/micros),
+   enums, nested records, arrays, maps, and unions (2-variant nullable and
+   N-variant sparse). Anything outside that subset transparently falls back
+   to the original `apache_avro`-based path.
+2. Releasing Python's GIL during deserialization.
+3. Multi-core processing via rayon (configurable chunk count).
+
+The speed-ups are much more noticeable on larger datasets or more complex avro schemas.
 
 ## Still experimental
 This library is still experimental and has not been tested in production. Please use with caution.
 
 # Benchmarks - comparing to fastavro
-### On a 2022 m2 macbook air with 8gb memory and 8 cores processing 10000 records using timeit
+
+### Apple M-series, 8 cores, processing 10,000 records using `timeit` (fastavro 1.12, pyarrow 24)
 ```
 Running pyruhvro serialize
-20 loops, best of 5: 13.8 msec per loop
+200 loops, best of 5: 1.40 msec per loop
 running fastavro serialize
-5 loops, best of 5: 71.7 msec per loop
+5 loops, best of 5: 57.6 msec per loop
 running pyruhvro deserialize
-50 loops, best of 5: 6.59 msec per loop
+200 loops, best of 5: 1.17 msec per loop
 running fastavro deserialize
-5 loops, best of 5: 55.3 msec per loop
+5 loops, best of 5: 40.5 msec per loop
 ```
+
+That works out to **≈ 41× faster than fastavro on serialize and ≈ 35× on deserialize**
+for this schema (a complex Kafka-style record with nested structs, arrays, maps,
+nullable fields, a multi-variant union, and an enum — see
+[`scripts/generate_avro.py`](scripts/generate_avro.py)).
 
 ### Run benchmarks locally 
 ```commandline
