@@ -8,7 +8,7 @@ description = "Fast, multi-threaded deserialization of schema-less avro encoded 
 repository = "https://github.com/Tyler-Sch/pyruhvro"
 
 [dependencies]
-rayon = "1.9.0"
-apache-avro = "0.16.0"
-arrow = { version = "52.0.0", features = [ "pyarrow" ]}
-anyhow = "1.0.80"
+rayon = "1.10"
+apache-avro = "0.21"
+arrow = "58"
+anyhow = "1.0"
