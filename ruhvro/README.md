@@ -42,3 +42,40 @@ fn main() {
 }
 ```
 
+## Benchmarks
+
+Criterion microbenchmarks live under `benches/` and cover both the deserialize and
+serialize paths across four schema shapes: `flat_primitives`, `nullable_primitives`,
+`nested_struct`, and `array_and_map`. Each measures the single-threaded path and the
+8-chunk rayon-parallel path on 1,000 records.
+
+Run everything:
+
+```sh
+cargo bench -p ruhvro
+```
+
+Run one direction or one schema:
+
+```sh
+cargo bench -p ruhvro --bench deserialize
+cargo bench -p ruhvro --bench serialize
+cargo bench -p ruhvro --bench deserialize -- flat_primitives
+```
+
+Criterion writes HTML reports to `target/criterion/report/index.html` after each run
+(with regression deltas if you've run before).
+
+### Profiling
+
+To see where time is going inside a hot bench, `samply` is the easiest macOS option
+since it doesn't need sudo:
+
+```sh
+cargo install samply
+cargo bench -p ruhvro --no-run                    # produces target/release/deps/deserialize-<hash>
+samply record target/release/deps/deserialize-<hash> --bench flat_primitives/per_datum_deserialize --profile-time 5
+```
+
+On Linux, `cargo flamegraph --bench deserialize -- flat_primitives/per_datum_deserialize`
+works equivalently and writes `flamegraph.svg`.
