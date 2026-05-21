@@ -100,7 +100,7 @@ fn schema_to_field_with_props(
                 DataType::Union(UnionFields::new(type_ids, fields), UnionMode::Sparse)
             }
         }
-        AvroSchema::Record(RecordSchema { name, fields, .. }) => {
+        AvroSchema::Record(RecordSchema { fields, .. }) => {
             let fields: Result<_> = fields
                 .iter()
                 .map(|field| {
@@ -108,12 +108,9 @@ fn schema_to_field_with_props(
                     if let Some(doc) = &field.doc {
                         props.insert("avro::doc".to_string(), doc.clone());
                     }
-                    /*if let Some(aliases) = fields.aliases {
-                        props.insert("aliases", aliases);
-                    }*/
                     schema_to_field_with_props(
                         &field.schema,
-                        Some(&format!("{}.{}", name.fullname(None), field.name)),
+                        Some(&field.name),
                         nullable,
                         Some(props),
                     )
@@ -122,8 +119,14 @@ fn schema_to_field_with_props(
             DataType::Struct(fields?)
         }
         AvroSchema::Enum(EnumSchema {
-            symbols: _, name, ..
-        }) => return Ok(Field::new(name.fullname(None), DataType::Utf8, nullable)),
+            symbols: _, name: enum_name, ..
+        }) => {
+            let field_name = match name {
+                Some(n) if !n.is_empty() => n.to_string(),
+                _ => enum_name.fullname(None),
+            };
+            return Ok(Field::new(field_name, DataType::Utf8, nullable));
+        }
         AvroSchema::Fixed(FixedSchema { size, .. }) => DataType::FixedSizeBinary(*size as i32),
         AvroSchema::Decimal(DecimalSchema {
             precision, scale, ..
@@ -293,4 +296,43 @@ fn test_sample() {
     let avro_schema = AvroSchema::parse_str(schema).unwrap();
     let arrow_schema = to_arrow_schema(&avro_schema).unwrap();
     println!("{:?}", arrow_schema);
+}
+
+#[test]
+fn test_field_names_use_avro_field_name() {
+    let schema = r#"
+        {
+            "type": "record",
+            "name": "User",
+            "namespace": "com.example",
+            "fields": [
+                {"name": "userid", "type": "string"},
+                {"name": "address", "type": ["null", {
+                    "type": "record",
+                    "name": "Address",
+                    "fields": [
+                        {"name": "street", "type": "string"},
+                        {"name": "city", "type": "string"}
+                    ]
+                }], "default": null},
+                {"name": "class", "type": {
+                    "type": "enum",
+                    "name": "ClassEnum",
+                    "symbols": ["A", "B", "C"]
+                }}
+            ]
+        }
+    "#;
+    let avro_schema = AvroSchema::parse_str(schema).unwrap();
+    let arrow_schema = to_arrow_schema(&avro_schema).unwrap();
+    let names: Vec<&str> = arrow_schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(names, vec!["userid", "address", "class"]);
+
+    let address_field = arrow_schema.field_with_name("address").unwrap();
+    if let DataType::Struct(nested) = address_field.data_type() {
+        let nested_names: Vec<&str> = nested.iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(nested_names, vec!["street", "city"]);
+    } else {
+        panic!("expected struct for address field");
+    }
 }
