@@ -36,7 +36,7 @@ pub fn to_arrow_schema(avro_schema: &AvroSchema) -> Result<Schema> {
     Ok(schema)
 }
 
-fn schema_to_field(schema: &AvroSchema, name: Option<&str>, nullable: bool) -> Result<Field> {
+pub(crate) fn schema_to_field(schema: &AvroSchema, name: Option<&str>, nullable: bool) -> Result<Field> {
     schema_to_field_with_props(schema, name, nullable, Default::default())
 }
 

@@ -6,6 +6,8 @@
 //!
 
 mod complex;
+mod fast_decode;
+mod fast_encode;
 /// Converts Avro to Arrow
 /// Decode Avro data returning an Arrow Record Batch.
 /// ## Example

@@ -1,4 +1,5 @@
 use crate::complex::StructContainer;
+use crate::fast_decode;
 use crate::schema_translate::to_arrow_schema;
 use std::sync::Arc;
 
@@ -19,8 +20,21 @@ pub fn parse_schema(schema_string: &str) -> Result<AvroSchema> {
 }
 
 /// Single threaded, takes a Vec of binary encoded schemaless avro and the parsed avro
-/// schema to read them.
+/// schema to read them. Dispatches to the [`fast_decode`] path when the schema
+/// is in its supported subset; otherwise uses the `Value`-tree path.
 pub fn per_datum_deserialize(data: &Vec<&[u8]>, schema: &AvroSchema) -> Result<RecordBatch> {
+    if fast_decode::is_supported(schema) {
+        return fast_decode::decode(data, schema);
+    }
+    per_datum_deserialize_baseline(data, schema)
+}
+
+/// `Value`-tree based deserialization. Public to the crate so the fast path can
+/// run differential tests against it.
+pub(crate) fn per_datum_deserialize_baseline(
+    data: &Vec<&[u8]>,
+    schema: &AvroSchema,
+) -> Result<RecordBatch> {
     let fields = to_arrow_schema(schema)?.fields;
     let mut builder = StructContainer::try_new_from_fields(fields, data.len())?;
     data.into_iter().try_for_each(|datum| {
@@ -34,13 +48,13 @@ pub fn per_datum_deserialize(data: &Vec<&[u8]>, schema: &AvroSchema) -> Result<R
 }
 
 /// Deserializes vector of serialized avro messages with many threads.
+/// Each chunk dispatches to the [`fast_decode`] path when the schema is supported.
 pub fn per_datum_deserialize_threaded(
     data: Vec<&[u8]>,
     schema: &AvroSchema,
     num_chunks: usize,
 ) -> Result<Vec<RecordBatch>> {
-    let arrow_schema = Arc::new(to_arrow_schema(schema)?);
-    let fields = &arrow_schema.fields;
+    let use_fast = fast_decode::is_supported(schema);
     let arr = Arc::new(BinaryArray::from_vec(data));
     let mut slices = vec![];
     let cores = num_chunks;
@@ -52,27 +66,20 @@ pub fn per_datum_deserialize_threaded(
             slices.push(arr.slice(i * chunk_size, chunk_size));
         }
     }
-    let r = slices
+    slices
         .par_iter()
-        .map(|da| {
-            // let mut builder = StructBuilder::from_fields(fields.clone(), data.len());
-
-            let mut builder =
-                StructContainer::try_new_from_fields(fields.clone(), arr.len())?;
-            da.iter().try_for_each(|avro_data| {
-                let mut sliced = avro_data.ok_or(anyhow!("Error getting sliced data"))?;
-                let deserialized = from_avro_datum(schema, &mut sliced, None)?;
-                let _ = builder.add_val(&deserialized);
-                Ok::<(), anyhow::Error>(())
-            })?;
-            let d = builder
-                .try_build_struct_array()
-                .expect("Failed to build struct from record");
-            let dd: RecordBatch = d.into();
-            Ok(dd)
+        .map(|da| -> Result<RecordBatch> {
+            let chunk_refs: Vec<&[u8]> = da
+                .iter()
+                .map(|x| x.ok_or_else(|| anyhow!("Error getting sliced data")))
+                .collect::<Result<Vec<_>>>()?;
+            if use_fast {
+                fast_decode::decode(&chunk_refs, schema)
+            } else {
+                per_datum_deserialize_baseline(&chunk_refs, schema)
+            }
         })
-        .collect();
-    r
+        .collect()
 }
 
 #[cfg(test)]
