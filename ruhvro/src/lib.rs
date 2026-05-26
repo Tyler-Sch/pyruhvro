@@ -8,6 +8,12 @@
 mod complex;
 mod fast_decode;
 mod fast_encode;
+
+use std::sync::OnceLock;
+static TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+    TOKIO_RT.get_or_init(|| tokio::runtime::Runtime::new().expect("failed to build tokio runtime"))
+}
 /// Converts Avro to Arrow
 /// Decode Avro data returning an Arrow Record Batch.
 /// ## Example

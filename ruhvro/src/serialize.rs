@@ -2,10 +2,10 @@ use apache_avro::Schema;
 use arrow::array::{
     Array, ArrayRef, GenericBinaryArray, RecordBatch, StructArray,
 };
-use rayon::prelude::*;
+use tokio::task;
 use std::sync::Arc;
 use crate::serialization_containers;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 // TODO: Should be checks to make sure avro and arrow schema match
 // TODO: need to figure out names. Should serialize match by name or position?
 // TODO: Should it include namespace in matching?
@@ -43,17 +43,70 @@ pub fn serialize_record_batch(
             }
         })
         .collect();
-    slices
-        .par_iter()
-        .map(|x| {
-            if use_fast {
-                crate::fast_encode::serialize_chunk(schema, x)
+    let schema_arc = Arc::new(schema.clone());
+    crate::runtime().block_on(async {
+        let handles: Vec<_> = slices
+            .into_iter()
+            .map(|x| {
+                let schema = Arc::clone(&schema_arc);
+                task::spawn_blocking(move || {
+                    if use_fast {
+                        crate::fast_encode::serialize_chunk(&schema, &x)
+                    } else {
+                        serialization_containers::serialize(&schema, &x)
+                    }
+                })
+            })
+            .collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await.map_err(|e| anyhow!("join error: {e}"))??);
+        }
+        Ok(results)
+    })
+}
+
+/// Same as [`serialize_record_batch`] but uses `tokio::spawn` (work-stealing async pool).
+pub fn serialize_record_batch_spawn(
+    rb: RecordBatch,
+    schema: &Schema,
+    num_chunks: usize,
+) -> Result<Vec<GenericBinaryArray<i32>>> {
+    let use_fast = crate::fast_encode::is_supported(schema);
+    let schema_arc = Arc::new(schema.clone());
+    let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
+    let chunk_size = struct_arry.len() / num_chunks;
+    let slices: Vec<_> = (0..num_chunks)
+        .map(|i| {
+            if i == num_chunks - 1 {
+                struct_arry.slice(i * chunk_size, struct_arry.len() - (i * chunk_size))
             } else {
-                serialization_containers::serialize(schema, x)
+                struct_arry.slice(i * chunk_size, chunk_size)
             }
         })
-        .collect()
+        .collect();
+    crate::runtime().block_on(async {
+        let handles: Vec<_> = slices
+            .into_iter()
+            .map(|x| {
+                let schema = Arc::clone(&schema_arc);
+                tokio::spawn(async move {
+                    if use_fast {
+                        crate::fast_encode::serialize_chunk(&schema, &x)
+                    } else {
+                        serialization_containers::serialize(&schema, &x)
+                    }
+                })
+            })
+            .collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await.map_err(|e| anyhow!("join error: {e}"))??);
+        }
+        Ok(results)
+    })
 }
+
 
 #[cfg(test)]
 mod test {

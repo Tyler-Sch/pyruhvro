@@ -1,10 +1,5 @@
 //! Criterion benchmarks for ruhvro's serialize path.
-//!
-//! Each bench:
-//!   1. Builds N avro-encoded records, deserializes them once into a
-//!      `RecordBatch` (in setup, outside the timing loop).
-//!   2. Measures `serialize_record_batch` with 1 chunk (single-threaded) and
-//!      8 chunks (rayon-parallel).
+//! Compares single-threaded, spawn_blocking (tokio), tokio::spawn, and rayon.
 //!
 //! Run with `cargo bench -p ruhvro --bench serialize`.
 
@@ -14,37 +9,42 @@ use apache_avro::Schema as AvroSchema;
 use arrow::array::RecordBatch;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use ruhvro::deserialize::per_datum_deserialize;
-use ruhvro::serialize::serialize_record_batch;
+use ruhvro::serialize::{
+    serialize_record_batch,
+    serialize_record_batch_spawn,
+};
 
-const N: usize = 1_000;
+const SIZES: &[usize] = &[1_000, 10_000];
 
 fn prepare_batch(parsed: &AvroSchema, encoded: &[Vec<u8>]) -> RecordBatch {
     let refs: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
     per_datum_deserialize(&refs, parsed).unwrap()
 }
 
-fn run_group(c: &mut Criterion, name: &str, parsed: AvroSchema, batch: RecordBatch) {
-    let mut group = c.benchmark_group(name);
-    group.throughput(Throughput::Elements(N as u64));
+fn run_group(c: &mut Criterion, schema_name: &str, parsed: AvroSchema, batch: RecordBatch, n: usize) {
+    let group_name = format!("{schema_name}/{n}");
+    let mut group = c.benchmark_group(&group_name);
+    group.throughput(Throughput::Elements(n as u64));
 
-    group.bench_function("serialize_record_batch_1chunk", |b| {
+    group.bench_function("single_threaded", |b| {
         b.iter(|| {
-            // RecordBatch holds Arc'd columns, so .clone() is cheap (refcount bumps).
-            let bytes = serialize_record_batch(black_box(batch.clone()), black_box(&parsed), 1)
-                .unwrap();
-            black_box(bytes);
+            black_box(serialize_record_batch(black_box(batch.clone()), black_box(&parsed), 1).unwrap())
         })
     });
 
-    group.bench_function("serialize_record_batch_8chunks", |b| {
+    group.bench_function("spawn_blocking", |b| {
         b.iter(|| {
-            let bytes = serialize_record_batch(
-                black_box(batch.clone()),
-                black_box(&parsed),
-                common::NUM_CHUNKS,
-            )
-            .unwrap();
-            black_box(bytes);
+            black_box(serialize_record_batch(
+                black_box(batch.clone()), black_box(&parsed), common::NUM_CHUNKS,
+            ).unwrap())
+        })
+    });
+
+    group.bench_function("tokio_spawn", |b| {
+        b.iter(|| {
+            black_box(serialize_record_batch_spawn(
+                black_box(batch.clone()), black_box(&parsed), common::NUM_CHUNKS,
+            ).unwrap())
         })
     });
 
@@ -52,27 +52,35 @@ fn run_group(c: &mut Criterion, name: &str, parsed: AvroSchema, batch: RecordBat
 }
 
 fn bench_flat_primitives(c: &mut Criterion) {
-    let (parsed, encoded) = common::flat_primitives(N);
-    let batch = prepare_batch(&parsed, &encoded);
-    run_group(c, "flat_primitives", parsed, batch);
+    for &n in SIZES {
+        let (parsed, encoded) = common::flat_primitives(n);
+        let batch = prepare_batch(&parsed, &encoded);
+        run_group(c, "flat_primitives", parsed, batch, n);
+    }
 }
 
 fn bench_nullable_primitives(c: &mut Criterion) {
-    let (parsed, encoded) = common::nullable_primitives(N);
-    let batch = prepare_batch(&parsed, &encoded);
-    run_group(c, "nullable_primitives", parsed, batch);
+    for &n in SIZES {
+        let (parsed, encoded) = common::nullable_primitives(n);
+        let batch = prepare_batch(&parsed, &encoded);
+        run_group(c, "nullable_primitives", parsed, batch, n);
+    }
 }
 
 fn bench_nested_struct(c: &mut Criterion) {
-    let (parsed, encoded) = common::nested_struct(N);
-    let batch = prepare_batch(&parsed, &encoded);
-    run_group(c, "nested_struct", parsed, batch);
+    for &n in SIZES {
+        let (parsed, encoded) = common::nested_struct(n);
+        let batch = prepare_batch(&parsed, &encoded);
+        run_group(c, "nested_struct", parsed, batch, n);
+    }
 }
 
 fn bench_array_and_map(c: &mut Criterion) {
-    let (parsed, encoded) = common::array_and_map(N);
-    let batch = prepare_batch(&parsed, &encoded);
-    run_group(c, "array_and_map", parsed, batch);
+    for &n in SIZES {
+        let (parsed, encoded) = common::array_and_map(n);
+        let batch = prepare_batch(&parsed, &encoded);
+        run_group(c, "array_and_map", parsed, batch, n);
+    }
 }
 
 criterion_group!(

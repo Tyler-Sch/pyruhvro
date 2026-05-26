@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use apache_avro::from_avro_datum;
 use apache_avro::Schema as AvroSchema;
 use arrow::array::{Array, BinaryArray, RecordBatch};
-use rayon::prelude::*;
+use tokio::task;
 // TODO: binary array
 // TODO: refactor full avro deserialization to lib.rs
 // TODO: Durations
@@ -73,25 +73,95 @@ pub fn per_datum_deserialize_threaded(
             slices.push(arr.slice(i * chunk_size, chunk_size));
         }
     }
-    slices
-        .par_iter()
-        .map(|da| -> Result<RecordBatch> {
-            let chunk_refs: Vec<&[u8]> = da
-                .iter()
-                .map(|x| x.ok_or_else(|| anyhow!("Error getting sliced data")))
-                .collect::<Result<Vec<_>>>()?;
-            if use_fast {
-                fast_decode::decode_with_arrow_schema(
-                    &chunk_refs,
-                    schema,
-                    arrow_schema.as_ref().unwrap(),
-                )
+    let schema_arc = Arc::new(schema.clone());
+    crate::runtime().block_on(async {
+        let handles: Vec<_> = slices
+            .into_iter()
+            .map(|da| {
+                let schema = Arc::clone(&schema_arc);
+                let arrow_schema = arrow_schema.clone();
+                task::spawn_blocking(move || -> Result<RecordBatch> {
+                    let chunk_refs: Vec<&[u8]> = da
+                        .iter()
+                        .map(|x| x.ok_or_else(|| anyhow!("Error getting sliced data")))
+                        .collect::<Result<Vec<_>>>()?;
+                    if use_fast {
+                        fast_decode::decode_with_arrow_schema(
+                            &chunk_refs,
+                            &schema,
+                            arrow_schema.as_ref().unwrap(),
+                        )
+                    } else {
+                        per_datum_deserialize_baseline(&chunk_refs, &schema)
+                    }
+                })
+            })
+            .collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await.map_err(|e| anyhow!("join error: {e}"))??);
+        }
+        Ok(results)
+    })
+}
+
+/// Same as [`per_datum_deserialize_threaded`] but uses `tokio::spawn` (work-stealing
+/// async pool) instead of `spawn_blocking`. CPU work runs directly on executor threads
+/// with no yield points — fine for benchmarking, not for mixed async/CPU workloads.
+pub fn per_datum_deserialize_threaded_spawn(
+    data: Vec<&[u8]>,
+    schema: &AvroSchema,
+    num_chunks: usize,
+) -> Result<Vec<RecordBatch>> {
+    let use_fast = fast_decode::is_supported(schema);
+    let arrow_schema = if use_fast {
+        Some(Arc::new(to_arrow_schema(schema)?))
+    } else {
+        None
+    };
+    let arr = Arc::new(BinaryArray::from_vec(data));
+    let chunk_size = arr.len() / num_chunks;
+    let slices: Vec<_> = (0..num_chunks)
+        .map(|i| {
+            if i == num_chunks - 1 {
+                arr.slice(i * chunk_size, arr.len() - (i * chunk_size))
             } else {
-                per_datum_deserialize_baseline(&chunk_refs, schema)
+                arr.slice(i * chunk_size, chunk_size)
             }
         })
-        .collect()
+        .collect();
+    let schema_arc = Arc::new(schema.clone());
+    crate::runtime().block_on(async {
+        let handles: Vec<_> = slices
+            .into_iter()
+            .map(|da| {
+                let schema = Arc::clone(&schema_arc);
+                let arrow_schema = arrow_schema.clone();
+                tokio::spawn(async move {
+                    let chunk_refs: Vec<&[u8]> = da
+                        .iter()
+                        .map(|x| x.ok_or_else(|| anyhow!("Error getting sliced data")))
+                        .collect::<Result<Vec<_>>>()?;
+                    if use_fast {
+                        fast_decode::decode_with_arrow_schema(
+                            &chunk_refs,
+                            &schema,
+                            arrow_schema.as_ref().unwrap(),
+                        )
+                    } else {
+                        per_datum_deserialize_baseline(&chunk_refs, &schema)
+                    }
+                })
+            })
+            .collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await.map_err(|e| anyhow!("join error: {e}"))??);
+        }
+        Ok(results)
+    })
 }
+
 
 #[cfg(test)]
 mod tests {
