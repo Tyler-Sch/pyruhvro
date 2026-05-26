@@ -16,7 +16,7 @@ members = [
 
 [package]
 name = "pyruhvro"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT"
 keywords = ["avro", "arrow", "kafka"]
@@ -31,7 +31,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.28"
-ruhvro = {path = "ruhvro", version = "0.3.0"}
+ruhvro = {path = "ruhvro", version = "0.3.1"}
 apache-avro = "0.21"
 arrow = {version = "58", features = ["pyarrow"]}
 
