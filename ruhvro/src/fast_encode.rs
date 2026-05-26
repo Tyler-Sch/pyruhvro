@@ -624,7 +624,7 @@ mod tests {
 
         // Decode via fast path, then serialize via fast path.
         let rb: RecordBatch = crate::fast_decode::decode(&refs, &s).unwrap();
-        let bytes_chunks = serialize_record_batch(rb.clone(), &s, 1).unwrap();
+        let bytes_chunks = serialize_record_batch(rb.clone(), std::sync::Arc::new(s.clone()), 1).unwrap();
         assert_eq!(bytes_chunks.len(), 1);
         let chunk = &bytes_chunks[0];
 
@@ -832,7 +832,7 @@ mod tests {
         let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
 
         let rb: RecordBatch = crate::fast_decode::decode(&refs, &s).unwrap();
-        let bytes_chunks = serialize_record_batch(rb.clone(), &s, 1).unwrap();
+        let bytes_chunks = serialize_record_batch(rb.clone(), std::sync::Arc::new(s.clone()), 1).unwrap();
         let chunk = &bytes_chunks[0];
         let round_refs: Vec<&[u8]> = (0..chunk.len()).map(|i| chunk.value(i)).collect();
         let round = crate::fast_decode::decode(&round_refs, &s).unwrap();

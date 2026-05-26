@@ -40,6 +40,7 @@ fn build_record(i: usize, sch: &AvroSchema) -> Value {
 
 fn main() {
     let parsed = parse_schema(SCHEMA).unwrap();
+    let schema_arc = std::sync::Arc::new(parsed.clone());
     let n = 1_000;
     let encoded: Vec<Vec<u8>> = (0..n)
         .map(|i| to_avro_datum(&parsed, build_record(i, &parsed)).unwrap())
@@ -49,7 +50,7 @@ fn main() {
     let mut total_rows: usize = 0;
     for iter in 0..10_000 {
         let refs: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
-        let rbs = per_datum_deserialize_threaded(refs, &parsed, 8).unwrap();
+        let rbs = per_datum_deserialize_threaded(refs, std::sync::Arc::clone(&schema_arc), 8).unwrap();
         total_rows += rbs.iter().map(|rb| rb.num_rows()).sum::<usize>();
         if iter % 1000 == 0 {
             eprintln!("  iter {iter}");

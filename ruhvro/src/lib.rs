@@ -8,6 +8,12 @@
 mod complex;
 mod fast_decode;
 mod fast_encode;
+
+use std::sync::OnceLock;
+static TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+    TOKIO_RT.get_or_init(|| tokio::runtime::Runtime::new().expect("failed to build tokio runtime"))
+}
 /// Converts Avro to Arrow
 /// Decode Avro data returning an Arrow Record Batch.
 /// ## Example
@@ -37,8 +43,10 @@ mod fast_encode;
 /// let deserialized = ruhvro::deserialize::per_datum_deserialize(&vec![&serialized[..]], &parsed_schema).unwrap();
 /// println!("{:?}", deserialized);
 ///
-/// // serialize the record batch
-/// let serialized = ruhvro::serialize::serialize_record_batch(deserialized, &parsed_schema, 1).unwrap();
+/// // serialize the record batch — threaded functions take an `Arc<Schema>`
+/// // so the parsed schema can be reused cheaply across calls.
+/// let schema_arc = std::sync::Arc::new(parsed_schema.clone());
+/// let serialized = ruhvro::serialize::serialize_record_batch(deserialized, schema_arc, 1).unwrap();
 /// println!("{:?}", serialized);
 ///
 ///
@@ -163,8 +171,11 @@ mod tests {
         let newv = vec![&encoded[..], &encoded2[..], &encoded3[..]];
         let result = per_datum_deserialize(&newv, &parsed_schema).unwrap();
 
-        let serialized = crate::serialize::serialize_record_batch(result, &parsed_schema, 1).unwrap();
-
+        let _serialized = crate::serialize::serialize_record_batch(
+            result,
+            std::sync::Arc::new(parsed_schema.clone()),
+            1,
+        ).unwrap();
     }
 
     pub fn decode_hex(s: &str) -> Vec<u8> {
