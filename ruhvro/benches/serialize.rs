@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use apache_avro::Schema as AvroSchema;
 use arrow::array::RecordBatch;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
@@ -22,20 +24,23 @@ fn prepare_batch(parsed: &AvroSchema, encoded: &[Vec<u8>]) -> RecordBatch {
 }
 
 fn run_group(c: &mut Criterion, schema_name: &str, parsed: AvroSchema, batch: RecordBatch, n: usize) {
+    let schema_arc = Arc::new(parsed);
     let group_name = format!("{schema_name}/{n}");
     let mut group = c.benchmark_group(&group_name);
     group.throughput(Throughput::Elements(n as u64));
 
     group.bench_function("single_threaded", |b| {
         b.iter(|| {
-            black_box(serialize_record_batch(black_box(batch.clone()), black_box(&parsed), 1).unwrap())
+            black_box(serialize_record_batch(
+                black_box(batch.clone()), black_box(Arc::clone(&schema_arc)), 1,
+            ).unwrap())
         })
     });
 
     group.bench_function("spawn_blocking", |b| {
         b.iter(|| {
             black_box(serialize_record_batch(
-                black_box(batch.clone()), black_box(&parsed), common::NUM_CHUNKS,
+                black_box(batch.clone()), black_box(Arc::clone(&schema_arc)), common::NUM_CHUNKS,
             ).unwrap())
         })
     });
@@ -43,7 +48,7 @@ fn run_group(c: &mut Criterion, schema_name: &str, parsed: AvroSchema, batch: Re
     group.bench_function("tokio_spawn", |b| {
         b.iter(|| {
             black_box(serialize_record_batch_spawn(
-                black_box(batch.clone()), black_box(&parsed), common::NUM_CHUNKS,
+                black_box(batch.clone()), black_box(Arc::clone(&schema_arc)), common::NUM_CHUNKS,
             ).unwrap())
         })
     });

@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use apache_avro::Schema as AvroSchema;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use ruhvro::deserialize::{
@@ -22,6 +24,7 @@ fn run_group(
     n: usize,
 ) {
     let refs: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+    let schema_arc = Arc::new(parsed.clone());
     let group_name = format!("{schema_name}/{n}");
     let mut group = c.benchmark_group(&group_name);
     group.throughput(Throughput::Elements(n as u64));
@@ -33,7 +36,7 @@ fn run_group(
     group.bench_function("spawn_blocking", |b| {
         b.iter(|| {
             black_box(per_datum_deserialize_threaded(
-                black_box(refs.clone()), black_box(&parsed), common::NUM_CHUNKS,
+                black_box(refs.clone()), black_box(Arc::clone(&schema_arc)), common::NUM_CHUNKS,
             ).unwrap())
         })
     });
@@ -41,7 +44,7 @@ fn run_group(
     group.bench_function("tokio_spawn", |b| {
         b.iter(|| {
             black_box(per_datum_deserialize_threaded_spawn(
-                black_box(refs.clone()), black_box(&parsed), common::NUM_CHUNKS,
+                black_box(refs.clone()), black_box(Arc::clone(&schema_arc)), common::NUM_CHUNKS,
             ).unwrap())
         })
     });

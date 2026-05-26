@@ -47,38 +47,53 @@ pub(crate) fn per_datum_deserialize_baseline(
     Ok(sa.into())
 }
 
+/// Clamp `num_chunks` to the range `[1, max(data_len, 1)]`. Callers that pass
+/// `0` get a single chunk; callers asking for more chunks than rows get one
+/// chunk per row so we don't spawn empty tasks.
+fn clamp_chunks(num_chunks: usize, data_len: usize) -> usize {
+    num_chunks.max(1).min(data_len.max(1))
+}
+
+fn build_slices(arr: &Arc<BinaryArray>, num_chunks: usize) -> Vec<BinaryArray> {
+    let chunk_size = arr.len() / num_chunks;
+    (0..num_chunks)
+        .map(|i| {
+            if i == num_chunks - 1 {
+                arr.slice(i * chunk_size, arr.len() - (i * chunk_size))
+            } else {
+                arr.slice(i * chunk_size, chunk_size)
+            }
+        })
+        .collect()
+}
+
 /// Deserializes vector of serialized avro messages with many threads.
 /// Each chunk dispatches to the [`fast_decode`] path when the schema is supported.
+///
+/// The caller passes the parsed schema in an `Arc` so it can be cheaply shared
+/// across spawned tasks. Reusing the same `Arc` across calls avoids re-cloning
+/// the schema on every invocation.
 pub fn per_datum_deserialize_threaded(
     data: Vec<&[u8]>,
-    schema: &AvroSchema,
+    schema: Arc<AvroSchema>,
     num_chunks: usize,
 ) -> Result<Vec<RecordBatch>> {
-    let use_fast = fast_decode::is_supported(schema);
+    let num_chunks = clamp_chunks(num_chunks, data.len());
+    let use_fast = fast_decode::is_supported(&schema);
     // Compute the Arrow schema once and share it across all chunks — avoids
     // an `to_arrow_schema` walk per chunk on the fast path.
     let arrow_schema = if use_fast {
-        Some(Arc::new(to_arrow_schema(schema)?))
+        Some(Arc::new(to_arrow_schema(&schema)?))
     } else {
         None
     };
     let arr = Arc::new(BinaryArray::from_vec(data));
-    let mut slices = vec![];
-    let cores = num_chunks;
-    let chunk_size = arr.len() / cores;
-    for i in 0..cores {
-        if i == cores - 1 {
-            slices.push(arr.slice(i * chunk_size, arr.len() - (i * chunk_size)));
-        } else {
-            slices.push(arr.slice(i * chunk_size, chunk_size));
-        }
-    }
-    let schema_arc = Arc::new(schema.clone());
+    let slices = build_slices(&arr, num_chunks);
     crate::runtime().block_on(async {
         let handles: Vec<_> = slices
             .into_iter()
             .map(|da| {
-                let schema = Arc::clone(&schema_arc);
+                let schema = Arc::clone(&schema);
                 let arrow_schema = arrow_schema.clone();
                 task::spawn_blocking(move || -> Result<RecordBatch> {
                     let chunk_refs: Vec<&[u8]> = da
@@ -106,36 +121,28 @@ pub fn per_datum_deserialize_threaded(
 }
 
 /// Same as [`per_datum_deserialize_threaded`] but uses `tokio::spawn` (work-stealing
-/// async pool) instead of `spawn_blocking`. CPU work runs directly on executor threads
-/// with no yield points — fine for benchmarking, not for mixed async/CPU workloads.
+/// async pool) instead of `spawn_blocking`. CPU work runs directly on executor
+/// threads with no yield points; safe to use here because the global runtime
+/// only services ruhvro tasks.
 pub fn per_datum_deserialize_threaded_spawn(
     data: Vec<&[u8]>,
-    schema: &AvroSchema,
+    schema: Arc<AvroSchema>,
     num_chunks: usize,
 ) -> Result<Vec<RecordBatch>> {
-    let use_fast = fast_decode::is_supported(schema);
+    let num_chunks = clamp_chunks(num_chunks, data.len());
+    let use_fast = fast_decode::is_supported(&schema);
     let arrow_schema = if use_fast {
-        Some(Arc::new(to_arrow_schema(schema)?))
+        Some(Arc::new(to_arrow_schema(&schema)?))
     } else {
         None
     };
     let arr = Arc::new(BinaryArray::from_vec(data));
-    let chunk_size = arr.len() / num_chunks;
-    let slices: Vec<_> = (0..num_chunks)
-        .map(|i| {
-            if i == num_chunks - 1 {
-                arr.slice(i * chunk_size, arr.len() - (i * chunk_size))
-            } else {
-                arr.slice(i * chunk_size, chunk_size)
-            }
-        })
-        .collect();
-    let schema_arc = Arc::new(schema.clone());
+    let slices = build_slices(&arr, num_chunks);
     crate::runtime().block_on(async {
         let handles: Vec<_> = slices
             .into_iter()
             .map(|da| {
-                let schema = Arc::clone(&schema_arc);
+                let schema = Arc::clone(&schema);
                 let arrow_schema = arrow_schema.clone();
                 tokio::spawn(async move {
                     let chunk_refs: Vec<&[u8]> = da

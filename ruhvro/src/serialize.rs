@@ -12,43 +12,43 @@ use anyhow::{anyhow, Result};
 // TODO: Add check for sparse union types
 // TODO: remove any unwraps and check results/errors
 
-/// Serializes a `RecordBatch` into a vector of `GenericBinaryArray<i32>`.
-///
-/// This function takes a `RecordBatch` and a schema as input and serializes the data
-/// in the `RecordBatch` into a vector of `GenericBinaryArray<i32>`. Each `GenericBinaryArray<i32>`
-/// represents a chunk of the serialized data.
-///
-/// # Arguments
-///
-/// * `rb` - The `RecordBatch` to be serialized.
-/// * `schema` - The schema of the `RecordBatch`.
-///
-/// # Returns
-///
-/// A vector of `GenericBinaryArray<i32>` representing the serialized data.
-pub fn serialize_record_batch(
-    rb: RecordBatch,
-    schema: &Schema,
-    num_chunks: usize,
-) -> Result<Vec<GenericBinaryArray<i32>>> {
-    let use_fast = crate::fast_encode::is_supported(schema);
-    let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
-    let chunk_size = struct_arry.len() / num_chunks;
-    let slices: Vec<_> = (0..num_chunks)
+fn clamp_chunks(num_chunks: usize, data_len: usize) -> usize {
+    num_chunks.max(1).min(data_len.max(1))
+}
+
+fn slice_struct(arr: &ArrayRef, num_chunks: usize) -> Vec<ArrayRef> {
+    let chunk_size = arr.len() / num_chunks;
+    (0..num_chunks)
         .map(|i| {
             if i == num_chunks - 1 {
-                struct_arry.slice(i * chunk_size, struct_arry.len() - (i * chunk_size))
+                arr.slice(i * chunk_size, arr.len() - (i * chunk_size))
             } else {
-                struct_arry.slice(i * chunk_size, chunk_size)
+                arr.slice(i * chunk_size, chunk_size)
             }
         })
-        .collect();
-    let schema_arc = Arc::new(schema.clone());
+        .collect()
+}
+
+/// Serializes a `RecordBatch` into a vector of `GenericBinaryArray<i32>`,
+/// one per chunk.
+///
+/// The caller passes the schema in an `Arc` so it can be cheaply shared across
+/// spawned tasks. `num_chunks` is clamped to `[1, rows]` to avoid spawning
+/// empty tasks when callers ask for more chunks than rows.
+pub fn serialize_record_batch(
+    rb: RecordBatch,
+    schema: Arc<Schema>,
+    num_chunks: usize,
+) -> Result<Vec<GenericBinaryArray<i32>>> {
+    let use_fast = crate::fast_encode::is_supported(&schema);
+    let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
+    let num_chunks = clamp_chunks(num_chunks, struct_arry.len());
+    let slices = slice_struct(&struct_arry, num_chunks);
     crate::runtime().block_on(async {
         let handles: Vec<_> = slices
             .into_iter()
             .map(|x| {
-                let schema = Arc::clone(&schema_arc);
+                let schema = Arc::clone(&schema);
                 task::spawn_blocking(move || {
                     if use_fast {
                         crate::fast_encode::serialize_chunk(&schema, &x)
@@ -69,27 +69,18 @@ pub fn serialize_record_batch(
 /// Same as [`serialize_record_batch`] but uses `tokio::spawn` (work-stealing async pool).
 pub fn serialize_record_batch_spawn(
     rb: RecordBatch,
-    schema: &Schema,
+    schema: Arc<Schema>,
     num_chunks: usize,
 ) -> Result<Vec<GenericBinaryArray<i32>>> {
-    let use_fast = crate::fast_encode::is_supported(schema);
-    let schema_arc = Arc::new(schema.clone());
+    let use_fast = crate::fast_encode::is_supported(&schema);
     let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
-    let chunk_size = struct_arry.len() / num_chunks;
-    let slices: Vec<_> = (0..num_chunks)
-        .map(|i| {
-            if i == num_chunks - 1 {
-                struct_arry.slice(i * chunk_size, struct_arry.len() - (i * chunk_size))
-            } else {
-                struct_arry.slice(i * chunk_size, chunk_size)
-            }
-        })
-        .collect();
+    let num_chunks = clamp_chunks(num_chunks, struct_arry.len());
+    let slices = slice_struct(&struct_arry, num_chunks);
     crate::runtime().block_on(async {
         let handles: Vec<_> = slices
             .into_iter()
             .map(|x| {
-                let schema = Arc::clone(&schema_arc);
+                let schema = Arc::clone(&schema);
                 tokio::spawn(async move {
                     if use_fast {
                         crate::fast_encode::serialize_chunk(&schema, &x)
@@ -203,7 +194,7 @@ mod test {
         let schema = Schema::parse_str(avro_schema).unwrap();
         // let struct_arr_ref: ArrayRef = Arc::new(struct_arr);
         let struct_arr_ref: RecordBatch = struct_arr.into();
-        let r = serialize_record_batch(struct_arr_ref.clone(), &schema, 1).unwrap();
+        let r = serialize_record_batch(struct_arr_ref.clone(), Arc::new(schema.clone()), 1).unwrap();
         let ra = r
             .iter()
             .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
@@ -261,7 +252,7 @@ mod test {
         );
         let arr: RecordBatch = outer_struct_arr.into();
         let parsed_schmea = Schema::parse_str(schmea).unwrap();
-        let arr_cont = serialize_record_batch(arr.clone(), &parsed_schmea, 1).unwrap();
+        let arr_cont = serialize_record_batch(arr.clone(), Arc::new(parsed_schmea.clone()), 1).unwrap();
         let ra = arr_cont
             .iter()
             .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
@@ -308,7 +299,7 @@ mod test {
         let schema = Schema::parse_str(schema).unwrap();
         let record_arr_ref: RecordBatch = record_arr.into();
         println!("{:?}", record_arr_ref);
-        let r = serialize_record_batch(record_arr_ref.clone(), &schema, 1).unwrap();
+        let r = serialize_record_batch(record_arr_ref.clone(), Arc::new(schema.clone()), 1).unwrap();
         let ra = r
             .iter()
             .map(|x| x.iter().map(|j| j.unwrap()).collect::<Vec<_>>())
@@ -398,8 +389,8 @@ mod test {
             ("a", a_arr.clone()),
         ]).unwrap();
 
-        let in_order_bytes = serialize_record_batch(in_order, &parsed, 1).unwrap();
-        let reversed_bytes = serialize_record_batch(reversed, &parsed, 1).unwrap();
+        let in_order_bytes = serialize_record_batch(in_order, Arc::new(parsed.clone()), 1).unwrap();
+        let reversed_bytes = serialize_record_batch(reversed, Arc::new(parsed.clone()), 1).unwrap();
 
         assert_eq!(in_order_bytes.len(), reversed_bytes.len());
         for (a, b) in in_order_bytes.iter().zip(reversed_bytes.iter()) {
@@ -425,7 +416,7 @@ mod test {
         let a_arr: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
         let batch = RecordBatch::try_from_iter(vec![("a", a_arr)]).unwrap();
 
-        let err = serialize_record_batch(batch, &parsed, 1).unwrap_err();
+        let err = serialize_record_batch(batch, Arc::new(parsed.clone()), 1).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("missing column 'b'"), "unexpected error: {msg}");
     }
