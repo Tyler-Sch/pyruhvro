@@ -627,7 +627,7 @@ mod tests {
     fn test_union_array() {
         let int_f = Arc::new(Field::new("int_field", DataType::Int32, false));
         let str_f = Arc::new(Field::new("str_field", DataType::Utf8, false));
-        let union_fields = UnionFields::new([0, 1], [int_f.clone(), str_f.clone()]);
+        let union_fields = UnionFields::try_new([0, 1], [int_f.clone(), str_f.clone()]).unwrap();
         let union_f = Field::new(
             "union_f",
             DataType::Union(union_fields, UnionMode::Dense),
@@ -665,7 +665,7 @@ mod tests {
        let int_f = Arc::new(Field::new("int_field", DataType::Int32, false));
         let str_f = Arc::new(Field::new("str_field", DataType::Utf8, false));
         let null_f = Arc::new(Field::new("null_field", DataType::Null, false));
-        let union_fields = UnionFields::new([0, 1, 2], [null_f, int_f.clone(), str_f.clone()]);
+        let union_fields = UnionFields::try_new([0, 1, 2], [null_f, int_f.clone(), str_f.clone()]).unwrap();
         let union_f = Field::new(
             "union_f",
             DataType::Union(union_fields, UnionMode::Sparse),
@@ -887,7 +887,7 @@ mod tests {
         // a UnionArray::try_new failure.
         let int_f = Arc::new(Field::new("int_field", DataType::Int32, false));
         let str_f = Arc::new(Field::new("str_field", DataType::Utf8, false));
-        let union_fields = UnionFields::new([0, 1], [int_f, str_f]);
+        let union_fields = UnionFields::try_new([0, 1], [int_f, str_f]).unwrap();
         let union_f = Field::new(
             "union_f",
             DataType::Union(union_fields, UnionMode::Sparse),

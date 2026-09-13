@@ -626,7 +626,7 @@ impl ContainerIter for EnumArrayContainer<'_> {
 mod tests {
     use super::*;
     use apache_avro::schema::{
-        EnumSchema, Name, RecordField, RecordFieldOrder, RecordSchema, UnionSchema,
+        EnumSchema, Name, RecordField, RecordSchema, UnionSchema,
     };
     use apache_avro::types::Value;
     use apache_avro::Schema;
@@ -641,10 +641,7 @@ mod tests {
     fn test_enum_container() {
         let arr: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "c"]));
         let schema = Schema::Enum(EnumSchema {
-            name: Name {
-                name: "enum".to_owned(),
-                namespace: None,
-            },
+            name: Name::new("enum").unwrap(),
             aliases: None,
             doc: None,
             symbols: vec!["a".to_string(), "b".to_string(), "c".to_string()],
@@ -714,14 +711,15 @@ mod tests {
         let schema = Schema::Union(
             UnionSchema::new(vec![Schema::Int, Schema::String, Schema::Boolean]).unwrap(),
         );
-        let fields = UnionFields::new(
+        let fields = UnionFields::try_new(
             vec![0, 1, 2],
             vec![
                 Field::new("int_field", DataType::Int32, true),
                 Field::new("strfield", DataType::Utf8, true),
                 Field::new("bool_field", DataType::Boolean, true),
             ],
-        );
+        )
+        .unwrap();
         let children: Vec<ArrayRef> = vec![
             Arc::new(arr1) as ArrayRef,
             Arc::new(arr2) as ArrayRef,
@@ -758,7 +756,7 @@ mod tests {
             ])
             .unwrap(),
         );
-        let fields = UnionFields::new(
+        let fields = UnionFields::try_new(
             vec![0, 1, 2, 3],
             vec![
                 Field::new("null_field", DataType::Null, true),
@@ -766,7 +764,8 @@ mod tests {
                 Field::new("strfield", DataType::Utf8, true),
                 Field::new("bool_field", DataType::Boolean, true),
             ],
-        );
+        )
+        .unwrap();
         let children: Vec<ArrayRef> = vec![
             Arc::new(NullArray::new(4)),
             Arc::new(arr1) as ArrayRef,
@@ -804,31 +803,24 @@ mod tests {
         ));
 
         let schema = Schema::Record(RecordSchema {
-            name: Name {
-                name: "struct_name".to_string(),
-                namespace: None,
-            },
+            name: Name::new("struct_name").unwrap(),
             aliases: None,
             doc: None,
             fields: vec![
                 RecordField {
                     name: "int_field".to_string(),
                     doc: None,
-                    aliases: None,
+                    aliases: vec![],
                     default: None,
                     schema: Schema::Int,
-                    order: RecordFieldOrder::Ascending,
-                    position: 0,
                     custom_attributes: Default::default(),
                 },
                 RecordField {
                     name: "strfield".to_string(),
                     doc: None,
-                    aliases: None,
+                    aliases: vec![],
                     default: None,
                     schema: Schema::String,
-                    order: RecordFieldOrder::Ascending,
-                    position: 0,
                     custom_attributes: Default::default(),
                 },
             ],
@@ -912,10 +904,7 @@ mod tests {
         let arr: ArrayRef =
             Arc::new(StringArray::from(vec![Some("a"), None, Some("c")]));
         let schema = Schema::Enum(EnumSchema {
-            name: Name {
-                name: "enum".to_owned(),
-                namespace: None,
-            },
+            name: Name::new("enum").unwrap(),
             aliases: None,
             doc: None,
             symbols: vec!["a".to_string(), "b".to_string(), "c".to_string()],

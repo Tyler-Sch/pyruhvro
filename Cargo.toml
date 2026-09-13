@@ -30,8 +30,8 @@ name = "pyruhvro"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.28"
+pyo3 = "0.29"
 ruhvro = {path = "ruhvro", version = "0.3.1"}
-apache-avro = "0.21"
-arrow = {version = "58", features = ["pyarrow"]}
+apache-avro = "0.22"
+arrow = {version = "59", features = ["pyarrow"]}
 

@@ -116,7 +116,7 @@ fn schema_to_field_with_props(
         AvroSchema::Union(us) => {
             // If there are only two variants and one of them is null, set the other type as the field data type
             let has_nullable = us
-                .find_schema_with_known_schemata::<apache_avro::Schema>(&Value::Null, None, &None)
+                .find_schema_with_known_schemata::<apache_avro::Schema>(&Value::Null, None, None)
                 .is_some();
             let sub_schemas = us.variants();
             if has_nullable && sub_schemas.len() == 2 {
@@ -142,7 +142,7 @@ fn schema_to_field_with_props(
                     })
                     .collect::<Result<Vec<Field>>>()?;
                 let type_ids = 0_i8..fields.len() as i8;
-                DataType::Union(UnionFields::new(type_ids, fields), UnionMode::Sparse)
+                DataType::Union(UnionFields::try_new(type_ids, fields)?, UnionMode::Sparse)
             }
         }
         AvroSchema::Record(RecordSchema { fields, .. }) => {
@@ -180,13 +180,13 @@ fn schema_to_field_with_props(
         AvroSchema::Decimal(DecimalSchema {
             precision, scale, ..
         }) => DataType::Decimal128(*precision as u8, *scale as i8),
-        AvroSchema::Uuid => DataType::FixedSizeBinary(16),
+        AvroSchema::Uuid(_) => DataType::FixedSizeBinary(16),
         AvroSchema::Date => DataType::Date32,
         AvroSchema::TimeMillis => DataType::Time32(TimeUnit::Millisecond),
         AvroSchema::TimeMicros => DataType::Time64(TimeUnit::Microsecond),
         AvroSchema::TimestampMillis => DataType::Timestamp(TimeUnit::Millisecond, None),
         AvroSchema::TimestampMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
-        AvroSchema::Duration => DataType::Duration(TimeUnit::Millisecond),
+        AvroSchema::Duration(_) => DataType::Duration(TimeUnit::Millisecond),
         _ => unimplemented!(),
     };
 
@@ -283,23 +283,23 @@ fn external_props(schema: &AvroSchema) -> HashMap<String, String> {
     }
     match &schema {
         AvroSchema::Record(RecordSchema {
-            name: Name { namespace, .. },
+            name,
             aliases: Some(aliases),
             ..
         })
         | AvroSchema::Enum(EnumSchema {
-            name: Name { namespace, .. },
+            name,
             aliases: Some(aliases),
             ..
         })
         | AvroSchema::Fixed(FixedSchema {
-            name: Name { namespace, .. },
+            name,
             aliases: Some(aliases),
             ..
         }) => {
             let aliases: Vec<String> = aliases
                 .iter()
-                .map(|alias| aliased(alias, namespace.as_deref(), None))
+                .map(|alias| aliased(alias, name.namespace(), None))
                 .collect();
             props.insert(
                 "avro::aliases".to_string(),
