@@ -169,13 +169,12 @@ pub fn per_datum_deserialize_threaded_spawn(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use apache_avro::to_avro_datum;
-    use apache_avro::types::Record;
-    use arrow::array::StringArray;
+    use apache_avro::types::{Record, Value};
+    use arrow::array::{StringArray, StructArray};
     pub fn decode_hex(s: &str) -> Vec<u8> {
         (0..s.len())
             .step_by(2)
@@ -375,5 +374,80 @@ mod tests {
         let serialized = to_avro_datum(&parsed_schema, record).unwrap();
         let result = per_datum_deserialize(&vec![&serialized[..]], &parsed_schema).unwrap();
         assert_eq!(result.num_columns(), 2);
+    }
+
+    #[test]
+    fn test_deserialize_named_record_references() {
+        let raw_schema = r#"
+            {
+                "type": "record",
+                "name": "PositionValue",
+                "namespace": "com.example.positions",
+                "fields": [
+                    {
+                        "name": "Current",
+                        "type": {
+                            "type": "record",
+                            "name": "PositionLongShort",
+                            "fields": [
+                                {
+                                    "name": "Long",
+                                    "type": {
+                                        "type": "record",
+                                        "name": "PositionSide",
+                                        "fields": [
+                                            {"name": "Shares", "type": "string"}
+                                        ]
+                                    }
+                                },
+                                {"name": "Short", "type": "PositionSide"}
+                            ]
+                        }
+                    },
+                    {"name": "Target", "type": "PositionLongShort"}
+                ]
+            }
+        "#;
+        let schema = parse_schema(raw_schema).unwrap();
+        let position_side = |shares: &str| {
+            Value::Record(vec![(
+                "Shares".to_string(),
+                Value::String(shares.to_string()),
+            )])
+        };
+        let long_short = |long: &str, short: &str| {
+            Value::Record(vec![
+                ("Long".to_string(), position_side(long)),
+                ("Short".to_string(), position_side(short)),
+            ])
+        };
+        let value = Value::Record(vec![
+            ("Current".to_string(), long_short("100", "20")),
+            ("Target".to_string(), long_short("125", "10")),
+        ]);
+        let serialized = to_avro_datum(&schema, value).unwrap();
+
+        let result = per_datum_deserialize(&vec![&serialized], &schema).unwrap();
+
+        assert_eq!(result.num_rows(), 1);
+        let target = result
+            .column_by_name("Target")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let target_short = target
+            .column_by_name("Short")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let shares = target_short
+            .column_by_name("Shares")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(shares.value(0), "10");
     }
 }
