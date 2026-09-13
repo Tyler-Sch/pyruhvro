@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Result};
-use apache_avro::schema::{Alias, DecimalSchema, EnumSchema, FixedSchema, Name, RecordSchema};
+use apache_avro::schema::{
+    Alias, DecimalSchema, EnumSchema, FixedSchema, Name, NamesRef, RecordSchema, ResolvedSchema,
+};
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
 use arrow::datatypes::{
     DataType, Field, Fields, IntervalUnit, Schema, TimeUnit, UnionFields, UnionMode,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Kindly borrowed and slightly modified from data fusion
@@ -17,6 +19,9 @@ use std::sync::Arc;
 
 /// Converts an avro schema to an arrow schema
 pub fn to_arrow_schema(avro_schema: &AvroSchema) -> Result<Schema> {
+    let resolved_schema = ResolvedSchema::try_from(avro_schema)?;
+    let names = resolved_schema.get_names();
+    let mut resolving = HashSet::new();
     let mut schema_fields = vec![];
     match avro_schema {
         AvroSchema::Record(RecordSchema { fields, .. }) => {
@@ -26,18 +31,23 @@ pub fn to_arrow_schema(avro_schema: &AvroSchema) -> Result<Schema> {
                     Some(&field.name),
                     false,
                     Some(external_props(&field.schema)),
+                    names,
+                    &mut resolving,
                 )?)
             }
         }
-        schema => schema_fields.push(schema_to_field(schema, Some(""), false)?),
+        schema => schema_fields.push(schema_to_field_with_props(
+            schema,
+            Some(""),
+            false,
+            None,
+            names,
+            &mut resolving,
+        )?),
     }
 
     let schema = Schema::new(schema_fields);
     Ok(schema)
-}
-
-pub(crate) fn schema_to_field(schema: &AvroSchema, name: Option<&str>, nullable: bool) -> Result<Field> {
-    schema_to_field_with_props(schema, name, nullable, Default::default())
 }
 
 fn schema_to_field_with_props(
@@ -45,10 +55,31 @@ fn schema_to_field_with_props(
     name: Option<&str>,
     nullable: bool,
     props: Option<HashMap<String, String>>,
+    names: &NamesRef<'_>,
+    resolving: &mut HashSet<Name>,
 ) -> Result<Field> {
     let mut nullable = nullable;
     let field_type: DataType = match schema {
-        AvroSchema::Ref { .. } => todo!("Add support for AvroSchema::Ref"),
+        AvroSchema::Ref {
+            name: reference_name,
+        } => {
+            let resolved = names.get(reference_name).ok_or_else(|| {
+                anyhow!(
+                    "Avro schema reference '{}' could not be resolved",
+                    reference_name.fullname(None)
+                )
+            })?;
+            if !resolving.insert(reference_name.clone()) {
+                return Err(anyhow!(
+                    "Recursive Avro schema reference '{}' cannot be represented as an Arrow schema",
+                    reference_name.fullname(None)
+                ));
+            }
+            let field =
+                schema_to_field_with_props(resolved, name, nullable, props, names, resolving);
+            resolving.remove(reference_name);
+            return field;
+        }
         AvroSchema::Null => DataType::Null,
         AvroSchema::Boolean => DataType::Boolean,
         AvroSchema::Int => DataType::Int32,
@@ -62,9 +93,18 @@ fn schema_to_field_with_props(
             Some("item"),
             true,
             None,
+            names,
+            resolving,
         )?)),
         AvroSchema::Map(value_schema) => {
-            let value_field = schema_to_field_with_props(&value_schema.types, Some("values"), false, None)?;
+            let value_field = schema_to_field_with_props(
+                &value_schema.types,
+                Some("values"),
+                false,
+                None,
+                names,
+                resolving,
+            )?;
             let key_field = Field::new("keys", DataType::Utf8, false);
             let map_field = Arc::new(Field::new(
                 "entries",
@@ -85,7 +125,7 @@ fn schema_to_field_with_props(
                     .iter()
                     .find(|&schema| !matches!(schema, AvroSchema::Null))
                 {
-                    schema_to_field_with_props(schema, None, has_nullable, None)?
+                    schema_to_field_with_props(schema, None, has_nullable, None, names, resolving)?
                         .data_type()
                         .clone()
                 } else {
@@ -97,7 +137,9 @@ fn schema_to_field_with_props(
                 }
                 let fields = sub_schemas
                     .iter()
-                    .map(|s| schema_to_field_with_props(s, None, true, None))
+                    .map(|schema| {
+                        schema_to_field_with_props(schema, None, true, None, names, resolving)
+                    })
                     .collect::<Result<Vec<Field>>>()?;
                 let type_ids = 0_i8..fields.len() as i8;
                 DataType::Union(UnionFields::new(type_ids, fields), UnionMode::Sparse)
@@ -116,13 +158,17 @@ fn schema_to_field_with_props(
                         Some(&field.name),
                         nullable,
                         Some(props),
+                        names,
+                        resolving,
                     )
                 })
                 .collect();
             DataType::Struct(fields?)
         }
         AvroSchema::Enum(EnumSchema {
-            symbols: _, name: enum_name, ..
+            symbols: _,
+            name: enum_name,
+            ..
         }) => {
             let field_name = match name {
                 Some(n) if !n.is_empty() => n.to_string(),
@@ -328,7 +374,11 @@ fn test_field_names_use_avro_field_name() {
     "#;
     let avro_schema = AvroSchema::parse_str(schema).unwrap();
     let arrow_schema = to_arrow_schema(&avro_schema).unwrap();
-    let names: Vec<&str> = arrow_schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let names: Vec<&str> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
     assert_eq!(names, vec!["userid", "address", "class"]);
 
     let address_field = arrow_schema.field_with_name("address").unwrap();
@@ -338,4 +388,76 @@ fn test_field_names_use_avro_field_name() {
     } else {
         panic!("expected struct for address field");
     }
+}
+
+#[test]
+fn test_named_record_references_are_expanded() {
+    let schema = r#"
+        {
+            "type": "record",
+            "name": "PositionValue",
+            "namespace": "com.example.positions",
+            "fields": [
+                {
+                    "name": "Current",
+                    "type": {
+                        "type": "record",
+                        "name": "PositionLongShort",
+                        "fields": [
+                            {
+                                "name": "Long",
+                                "type": {
+                                    "type": "record",
+                                    "name": "PositionSide",
+                                    "fields": [
+                                        {"name": "Shares", "type": "string"}
+                                    ]
+                                }
+                            },
+                            {"name": "Short", "type": "PositionSide"}
+                        ]
+                    }
+                },
+                {"name": "Target", "type": "PositionLongShort"}
+            ]
+        }
+    "#;
+
+    let avro_schema = AvroSchema::parse_str(schema).unwrap();
+    let arrow_schema = to_arrow_schema(&avro_schema).unwrap();
+
+    let current = arrow_schema.field_with_name("Current").unwrap();
+    let target = arrow_schema.field_with_name("Target").unwrap();
+    assert_eq!(current.data_type(), target.data_type());
+
+    let DataType::Struct(long_short_fields) = target.data_type() else {
+        panic!("expected Target to be a struct");
+    };
+    assert_eq!(long_short_fields[0].name(), "Long");
+    assert_eq!(long_short_fields[1].name(), "Short");
+    assert_eq!(
+        long_short_fields[0].data_type(),
+        long_short_fields[1].data_type()
+    );
+}
+
+#[test]
+fn test_recursive_named_record_returns_an_error() {
+    let schema = r#"
+        {
+            "type": "record",
+            "name": "Node",
+            "fields": [
+                {"name": "value", "type": "long"},
+                {"name": "next", "type": ["null", "Node"], "default": null}
+            ]
+        }
+    "#;
+
+    let avro_schema = AvroSchema::parse_str(schema).unwrap();
+    let error = to_arrow_schema(&avro_schema).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("Recursive Avro schema reference 'Node'"));
 }
