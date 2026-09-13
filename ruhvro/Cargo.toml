@@ -9,12 +9,12 @@ repository = "https://github.com/Tyler-Sch/pyruhvro"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
-apache-avro = "0.21"
-arrow = "58"
+apache-avro = "0.22"
+arrow = "59"
 anyhow = "1.0"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "deserialize"
