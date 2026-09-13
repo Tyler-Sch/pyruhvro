@@ -181,7 +181,7 @@ mod test {
                     {"name": "int_arr_2", "type": ["null","int"]},
                     {"name": "str_arr_1", "type": "string"},
                     {"name": "str_arr_2", "type": ["null", "string"]},
-                    {"name": "list_arr", "type": "array", "items": ["null", "int"]},
+                    {"name": "list_arr", "type": {"type": "array", "items": ["null", "int"]}},
                     {"name": "list_arr2", "type": ["null", {"type": "array", "items": ["null", "int"]}]},
                     {"name": "timestamp_arr", "type": {
                         "type": "long",
