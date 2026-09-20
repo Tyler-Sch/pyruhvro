@@ -4,6 +4,7 @@ use arrow::array::{
 };
 use tokio::task;
 use std::sync::Arc;
+use crate::schema::resolve_refs;
 use crate::serialization_containers;
 use anyhow::{anyhow, Result};
 // TODO: Should be checks to make sure avro and arrow schema match
@@ -40,7 +41,14 @@ pub fn serialize_record_batch(
     schema: Arc<Schema>,
     num_chunks: usize,
 ) -> Result<Vec<GenericBinaryArray<i32>>> {
-    let use_fast = crate::fast_encode::is_supported(&schema);
+    // Both encoders walk the schema structurally, so give them a copy with
+    // named refs inlined. The slow path still needs the original for
+    // `to_avro_datum`, which rejects duplicated named definitions.
+    let resolved: Arc<Schema> = match resolve_refs(&schema)? {
+        std::borrow::Cow::Borrowed(_) => Arc::clone(&schema),
+        std::borrow::Cow::Owned(s) => Arc::new(s),
+    };
+    let use_fast = crate::fast_encode::is_supported(&resolved);
     let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
     let num_chunks = clamp_chunks(num_chunks, struct_arry.len());
     let slices = slice_struct(&struct_arry, num_chunks);
@@ -49,11 +57,12 @@ pub fn serialize_record_batch(
             .into_iter()
             .map(|x| {
                 let schema = Arc::clone(&schema);
+                let resolved = Arc::clone(&resolved);
                 task::spawn_blocking(move || {
                     if use_fast {
-                        crate::fast_encode::serialize_chunk(&schema, &x)
+                        crate::fast_encode::serialize_chunk(&resolved, &x)
                     } else {
-                        serialization_containers::serialize(&schema, &x)
+                        serialization_containers::serialize(&schema, &resolved, &x)
                     }
                 })
             })
@@ -72,7 +81,14 @@ pub fn serialize_record_batch_spawn(
     schema: Arc<Schema>,
     num_chunks: usize,
 ) -> Result<Vec<GenericBinaryArray<i32>>> {
-    let use_fast = crate::fast_encode::is_supported(&schema);
+    // Both encoders walk the schema structurally, so give them a copy with
+    // named refs inlined. The slow path still needs the original for
+    // `to_avro_datum`, which rejects duplicated named definitions.
+    let resolved: Arc<Schema> = match resolve_refs(&schema)? {
+        std::borrow::Cow::Borrowed(_) => Arc::clone(&schema),
+        std::borrow::Cow::Owned(s) => Arc::new(s),
+    };
+    let use_fast = crate::fast_encode::is_supported(&resolved);
     let struct_arry: ArrayRef = Arc::<StructArray>::new(rb.into());
     let num_chunks = clamp_chunks(num_chunks, struct_arry.len());
     let slices = slice_struct(&struct_arry, num_chunks);
@@ -81,11 +97,12 @@ pub fn serialize_record_batch_spawn(
             .into_iter()
             .map(|x| {
                 let schema = Arc::clone(&schema);
+                let resolved = Arc::clone(&resolved);
                 tokio::spawn(async move {
                     if use_fast {
-                        crate::fast_encode::serialize_chunk(&schema, &x)
+                        crate::fast_encode::serialize_chunk(&resolved, &x)
                     } else {
-                        serialization_containers::serialize(&schema, &x)
+                        serialization_containers::serialize(&schema, &resolved, &x)
                     }
                 })
             })
@@ -419,5 +436,149 @@ mod test {
         let err = serialize_record_batch(batch, Arc::new(parsed.clone()), 1).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("missing column 'b'"), "unexpected error: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod named_ref_tests {
+    use super::*;
+    use crate::deserialize::{per_datum_deserialize, per_datum_deserialize_threaded};
+    use crate::schema::parse_schema;
+    use apache_avro::to_avro_datum;
+    use apache_avro::types::Value;
+
+    // `S` is defined once and referenced by name in a record field, a nullable
+    // union, an array, and a map — every container the resolver has to walk.
+    const SCHEMA: &str = r#"{
+        "type": "record", "name": "R", "namespace": "ns",
+        "fields": [
+            {"name": "a", "type": {"type": "record", "name": "S",
+                "fields": [{"name": "x", "type": "string"}, {"name": "y", "type": "int"}]}},
+            {"name": "b", "type": "S"},
+            {"name": "c", "type": ["null", "S"]},
+            {"name": "d", "type": {"type": "array", "items": "S"}},
+            {"name": "e", "type": {"type": "map", "values": "S"}}
+        ]
+    }"#;
+
+    fn s(x: &str, y: i32) -> Value {
+        Value::Record(vec![
+            ("x".to_string(), Value::String(x.to_string())),
+            ("y".to_string(), Value::Int(y)),
+        ])
+    }
+
+    fn row(i: i32) -> Value {
+        let c = if i % 2 == 0 {
+            Value::Union(1, Box::new(s("c", i)))
+        } else {
+            Value::Union(0, Box::new(Value::Null))
+        };
+        Value::Record(vec![
+            ("a".to_string(), s("a", i)),
+            ("b".to_string(), s("b", i * 10)),
+            ("c".to_string(), c),
+            ("d".to_string(), Value::Array(vec![s("d0", i), s("d1", i + 1)])),
+            (
+                "e".to_string(),
+                Value::Map([("k".to_string(), s("e", i))].into_iter().collect()),
+            ),
+        ])
+    }
+
+    fn encoded_rows(schema: &Schema, n: i32) -> Vec<Vec<u8>> {
+        (0..n).map(|i| to_avro_datum(schema, row(i)).unwrap()).collect()
+    }
+
+    #[test]
+    fn named_refs_take_the_fast_path() {
+        let schema = parse_schema(SCHEMA).unwrap();
+        let resolved = crate::schema::resolve_refs(&schema).unwrap();
+        assert!(crate::fast_decode::is_supported(&resolved));
+        assert!(crate::fast_encode::is_supported(&resolved));
+    }
+
+    #[test]
+    fn round_trip_single_threaded() {
+        let schema = Arc::new(parse_schema(SCHEMA).unwrap());
+        let bytes = encoded_rows(&schema, 5);
+        let refs: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+
+        let rb = per_datum_deserialize(&refs, &schema).unwrap();
+        assert_eq!(rb.num_rows(), 5);
+        let out = serialize_record_batch(rb, Arc::clone(&schema), 1).unwrap();
+        let got: Vec<&[u8]> = out.iter().flat_map(|a| a.iter().map(|v| v.unwrap())).collect();
+        assert_eq!(got, refs);
+    }
+
+    #[test]
+    fn round_trip_threaded() {
+        let schema = Arc::new(parse_schema(SCHEMA).unwrap());
+        let bytes = encoded_rows(&schema, 7);
+        let refs: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+
+        let rbs = per_datum_deserialize_threaded(refs.clone(), Arc::clone(&schema), 3).unwrap();
+        let rb = arrow::compute::concat_batches(&rbs[0].schema(), &rbs).unwrap();
+        assert_eq!(rb.num_rows(), 7);
+        let out = serialize_record_batch(rb, Arc::clone(&schema), 3).unwrap();
+        let got: Vec<&[u8]> = out.iter().flat_map(|a| a.iter().map(|v| v.unwrap())).collect();
+        assert_eq!(got, refs);
+    }
+
+    #[test]
+    fn slow_path_round_trip_with_named_refs() {
+        // Call the `Value`-based paths directly: the baseline decoder needs
+        // the original schema for `from_avro_datum`, and the container walk
+        // needs the inlined copy.
+        let schema = parse_schema(SCHEMA).unwrap();
+        let resolved = crate::schema::resolve_refs(&schema).unwrap();
+        let bytes = encoded_rows(&schema, 4);
+        let refs: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+
+        let rb = crate::deserialize::per_datum_deserialize_baseline(&refs, &schema).unwrap();
+        assert_eq!(rb.num_rows(), 4);
+        let struct_arr: ArrayRef = Arc::<StructArray>::new(rb.into());
+        let out = serialization_containers::serialize(&schema, &resolved, &struct_arr).unwrap();
+        let got: Vec<&[u8]> = out.iter().map(|v| v.unwrap()).collect();
+        assert_eq!(got, refs);
+    }
+
+    #[test]
+    fn parse_schema_list_round_trips_like_single_document() {
+        // Same types as SCHEMA, but `S` lives in its own document and `R`
+        // refers to it by name everywhere.
+        let s_doc = r#"{"type": "record", "name": "S", "namespace": "ns",
+            "fields": [{"name": "x", "type": "string"}, {"name": "y", "type": "int"}]}"#;
+        let r_doc = r#"{"type": "record", "name": "R", "namespace": "ns", "fields": [
+            {"name": "a", "type": "S"},
+            {"name": "b", "type": "S"},
+            {"name": "c", "type": ["null", "S"]},
+            {"name": "d", "type": {"type": "array", "items": "S"}},
+            {"name": "e", "type": {"type": "map", "values": "S"}}]}"#;
+        let from_list = Arc::new(crate::schema::parse_schema_list(&[s_doc, r_doc]).unwrap());
+        let single = parse_schema(SCHEMA).unwrap();
+
+        // Data written with the single-document schema reads with the list
+        // one and round-trips byte-for-byte on both fast and threaded paths.
+        let bytes = encoded_rows(&single, 6);
+        let refs: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+        let rbs = per_datum_deserialize_threaded(refs.clone(), Arc::clone(&from_list), 2).unwrap();
+        let rb = arrow::compute::concat_batches(&rbs[0].schema(), &rbs).unwrap();
+        assert_eq!(rb.num_rows(), 6);
+        let out = serialize_record_batch(rb, Arc::clone(&from_list), 2).unwrap();
+        let got: Vec<&[u8]> = out.iter().flat_map(|a| a.iter().map(|v| v.unwrap())).collect();
+        assert_eq!(got, refs);
+    }
+
+    #[test]
+    fn recursive_schema_is_an_error_not_a_panic() {
+        let schema = parse_schema(
+            r#"{"type":"record","name":"Node","fields":[
+                {"name":"v","type":"long"},
+                {"name":"next","type":["null","Node"],"default":null}]}"#,
+        )
+        .unwrap();
+        let err = per_datum_deserialize(&vec![&[0u8][..]], &schema).unwrap_err();
+        assert!(err.to_string().contains("Recursive Avro schema reference 'Node'"), "{err}");
     }
 }

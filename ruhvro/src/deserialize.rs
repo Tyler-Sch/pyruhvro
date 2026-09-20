@@ -1,6 +1,6 @@
 use crate::complex::StructContainer;
 use crate::fast_decode;
-use crate::schema_translate::to_arrow_schema;
+use crate::schema::{resolve_refs, to_arrow_schema};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -14,17 +14,25 @@ use tokio::task;
 // TODO: Add tests to assert errors when deserializing
 // TODO: add doc strings
 
-/// Parses string into AvroSchema object
-pub fn parse_schema(schema_string: &str) -> Result<AvroSchema> {
-    Ok(AvroSchema::parse_str(schema_string)?)
-}
+#[deprecated(note = "moved to `ruhvro::schema::parse_schema`")]
+pub use crate::schema::parse_schema;
+#[deprecated(note = "moved to `ruhvro::schema::parse_schema_list`")]
+pub use crate::schema::parse_schema_list;
 
 /// Single threaded, takes a Vec of binary encoded schemaless avro and the parsed avro
 /// schema to read them. Dispatches to the [`fast_decode`] path when the schema
 /// is in its supported subset; otherwise uses the `Value`-tree path.
 pub fn per_datum_deserialize(data: &Vec<&[u8]>, schema: &AvroSchema) -> Result<RecordBatch> {
-    if fast_decode::is_supported(schema) {
-        return fast_decode::decode(data, schema);
+    // The fast decoder walks the schema structurally, so hand it a copy with
+    // named references inlined. The baseline path keeps the original schema
+    // because `from_avro_datum` needs the un-expanded definitions.
+    let resolved = resolve_refs(schema)?;
+    if fast_decode::is_supported(&resolved) {
+        // The Arrow schema must come from the original: `to_arrow_schema`
+        // builds a name table, which rejects the duplicated definitions in
+        // the inlined copy.
+        let arrow_schema = Arc::new(to_arrow_schema(schema)?);
+        return fast_decode::decode_with_arrow_schema(data, &resolved, &arrow_schema);
     }
     per_datum_deserialize_baseline(data, schema)
 }
@@ -79,7 +87,13 @@ pub fn per_datum_deserialize_threaded(
     num_chunks: usize,
 ) -> Result<Vec<RecordBatch>> {
     let num_chunks = clamp_chunks(num_chunks, data.len());
-    let use_fast = fast_decode::is_supported(&schema);
+    // Inline named refs once and share the result across tasks; see
+    // `per_datum_deserialize` for why the baseline path keeps the original.
+    let resolved: Arc<AvroSchema> = match resolve_refs(&schema)? {
+        std::borrow::Cow::Borrowed(_) => Arc::clone(&schema),
+        std::borrow::Cow::Owned(s) => Arc::new(s),
+    };
+    let use_fast = fast_decode::is_supported(&resolved);
     // Compute the Arrow schema once and share it across all chunks — avoids
     // an `to_arrow_schema` walk per chunk on the fast path.
     let arrow_schema = if use_fast {
@@ -94,6 +108,7 @@ pub fn per_datum_deserialize_threaded(
             .into_iter()
             .map(|da| {
                 let schema = Arc::clone(&schema);
+                let resolved = Arc::clone(&resolved);
                 let arrow_schema = arrow_schema.clone();
                 task::spawn_blocking(move || -> Result<RecordBatch> {
                     let chunk_refs: Vec<&[u8]> = da
@@ -103,7 +118,7 @@ pub fn per_datum_deserialize_threaded(
                     if use_fast {
                         fast_decode::decode_with_arrow_schema(
                             &chunk_refs,
-                            &schema,
+                            &resolved,
                             arrow_schema.as_ref().unwrap(),
                         )
                     } else {
@@ -130,7 +145,13 @@ pub fn per_datum_deserialize_threaded_spawn(
     num_chunks: usize,
 ) -> Result<Vec<RecordBatch>> {
     let num_chunks = clamp_chunks(num_chunks, data.len());
-    let use_fast = fast_decode::is_supported(&schema);
+    // Inline named refs once and share the result across tasks; see
+    // `per_datum_deserialize` for why the baseline path keeps the original.
+    let resolved: Arc<AvroSchema> = match resolve_refs(&schema)? {
+        std::borrow::Cow::Borrowed(_) => Arc::clone(&schema),
+        std::borrow::Cow::Owned(s) => Arc::new(s),
+    };
+    let use_fast = fast_decode::is_supported(&resolved);
     let arrow_schema = if use_fast {
         Some(Arc::new(to_arrow_schema(&schema)?))
     } else {
@@ -143,6 +164,7 @@ pub fn per_datum_deserialize_threaded_spawn(
             .into_iter()
             .map(|da| {
                 let schema = Arc::clone(&schema);
+                let resolved = Arc::clone(&resolved);
                 let arrow_schema = arrow_schema.clone();
                 tokio::spawn(async move {
                     let chunk_refs: Vec<&[u8]> = da
@@ -152,7 +174,7 @@ pub fn per_datum_deserialize_threaded_spawn(
                     if use_fast {
                         fast_decode::decode_with_arrow_schema(
                             &chunk_refs,
-                            &schema,
+                            &resolved,
                             arrow_schema.as_ref().unwrap(),
                         )
                     } else {
@@ -172,6 +194,7 @@ pub fn per_datum_deserialize_threaded_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::parse_schema;
     use apache_avro::to_avro_datum;
     use apache_avro::types::{Record, Value};
     use arrow::array::{StringArray, StructArray};

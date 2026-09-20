@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Cargo workspace with two crates:
 
 - `ruhvro/` — the core Rust library (published as `ruhvro` on crates.io). Pure Rust API for serializing/deserializing schemaless Avro to/from Arrow `RecordBatch`es. Has no Python deps.
-- `src/lib.rs` (top-level) — the `pyruhvro` PyO3 extension module that wraps `ruhvro` and exposes it to Python via maturin. Exposes `deserialize_array`, `deserialize_array_threaded`, `serialize_record_batch`, plus `_spawn` variants that use `tokio::spawn` instead of `spawn_blocking`. Also maintains a `String -> Arc<Schema>` cache so repeat calls don't re-parse the schema JSON, and releases the GIL via `Python::detach` around every Rust call so multiple Python threads can run concurrently.
+- `src/lib.rs` (top-level) — the `pyruhvro` PyO3 extension module that wraps `ruhvro` and exposes it to Python via maturin. Exposes `deserialize_array`, `deserialize_array_threaded`, `serialize_record_batch`, plus `_spawn` variants that use `tokio::spawn` instead of `spawn_blocking`, and `avro_to_arrow_schema` (Avro schema → `pyarrow.Schema`, no data needed). Also maintains a `String -> Arc<Schema>` cache so repeat calls don't re-parse the schema JSON, and releases the GIL via `Python::detach` around every Rust call so multiple Python threads can run concurrently.
 
 Keep Python-facing concerns in the top-level crate; keep the Avro↔Arrow logic in `ruhvro/`. The PyO3 wrappers should stay thin — convert PyArrow types, call into `ruhvro`, return PyArrow types.
 
@@ -42,10 +42,13 @@ The pipeline is **schemaless Avro bytes ⇄ Arrow `RecordBatch`**, driven by a p
 
 Key modules in `ruhvro/src/`:
 
-- `deserialize.rs` — public entry points `parse_schema`, `per_datum_deserialize` (single-threaded), `per_datum_deserialize_threaded` (tokio `spawn_blocking`, splits input into `num_chunks` slices and returns one `RecordBatch` per chunk), plus `_spawn` variant on the work-stealing async pool. Threaded variants take an `Arc<Schema>` so callers can share one parsed schema across many calls without re-cloning.
+- `deserialize.rs` — public entry points `per_datum_deserialize` (single-threaded), `per_datum_deserialize_threaded` (tokio `spawn_blocking`, splits input into `num_chunks` slices and returns one `RecordBatch` per chunk), plus `_spawn` variant on the work-stealing async pool. Threaded variants take an `Arc<Schema>` so callers can share one parsed schema across many calls without re-cloning.
 - `serialize.rs` — public entry point `serialize_record_batch` (same `Arc<Schema>` convention). Converts the `RecordBatch` into a `StructArray`, slices it into `num_chunks`, and serializes each slice in parallel via tokio `spawn_blocking` into a `GenericBinaryArray<i32>` of Avro datums.
 - `fast_decode.rs` / `fast_encode.rs` — schema-walking decoder/encoder that bypasses the `apache_avro::Value` tree and writes straight into Arrow builders. Gated by `is_supported(schema)`; falls back to the `Value`-based path for schemas containing types outside the supported subset.
-- `schema_translate.rs` — converts an `apache_avro::Schema` into an `arrow::datatypes::Schema`. This is the source of truth for type mapping (e.g. nullable-union → nullable Arrow field, multi-variant unions → Arrow `Union`, Avro `map` → Arrow `Map`, logical types → Arrow temporal types).
+- `schema/` — everything that touches the Avro schema itself, independent of data flow:
+  - `schema/mod.rs` — public `parse_schema`, `parse_schema_list` (multi-document schemas; last element is the top-level schema, named types from the others get folded in), and re-exports `to_arrow_schema`. `deserialize::parse_schema{,_list}` remain as deprecated aliases for the published crate's callers.
+  - `schema/translate.rs` — converts an `apache_avro::Schema` into an `arrow::datatypes::Schema`. This is the source of truth for type mapping (e.g. nullable-union → nullable Arrow field, multi-variant unions → Arrow `Union`, Avro `map` → Arrow `Map`, logical types → Arrow temporal types).
+  - `schema/resolve.rs` — crate-private. `resolve_refs` inlines `Schema::Ref` named references so the structural walkers (`fast_decode`/`fast_encode`/`serialization_containers`) see a plain tree; `embed_definitions` is the inverse used by `parse_schema_list`. The resolved schema must not be passed to `apache_avro`'s own datum codecs (duplicate named definitions), so the data paths keep the original schema for those.
 - `complex.rs` — `AvroToArrowBuilder` and its `Struct`/`List`/`Union`/`Map`/`Primitive` variants. This is the *deserialize* side: walks Avro `Value`s into Arrow builders. The `add_val!` macro and `get_val_from_possible_union` helper handle the common "value might be wrapped in a union" case.
 - `serialization_containers.rs` — the *serialize* side: `ArrayContainers` walks Arrow arrays column-wise and re-emits `apache_avro::types::Value`s, then `to_avro_datum` encodes each row.
 
@@ -57,7 +60,7 @@ Both threaded paths require the caller to pass `num_chunks` explicitly — the l
 
 ### Avro union handling
 
-Nullable Avro fields (`["null", T]`) become nullable Arrow fields of type `T`. Wider unions (e.g. `["string","int","boolean"]`) become Arrow `Union` types. See `is_simple_null_union_type` in `serialization_containers.rs` and the matching logic in `schema_translate.rs` — any changes to union behavior must stay consistent across both sides.
+Nullable Avro fields (`["null", T]`) become nullable Arrow fields of type `T`. Wider unions (e.g. `["string","int","boolean"]`) become Arrow `Union` types. See `is_simple_null_union_type` in `serialization_containers.rs` and the matching logic in `schema/translate.rs` — any changes to union behavior must stay consistent across both sides.
 
 ## Release / CI
 

@@ -106,10 +106,13 @@ fn schema_to_field_with_props(
                 resolving,
             )?;
             let key_field = Field::new("keys", DataType::Utf8, false);
+            // The Arrow spec requires the map's `entries` struct to be
+            // non-nullable (`MapArray::try_new` enforces it); a null map is a
+            // null at the map level, not a null entry.
             let map_field = Arc::new(Field::new(
                 "entries",
                 DataType::Struct(Fields::from(vec![key_field, value_field])),
-                nullable,
+                false,
             ));
             DataType::Map(map_field, false)
         }
@@ -255,7 +258,7 @@ fn default_field_name(dt: &DataType) -> &str {
         DataType::Struct(_) => "struct",
         DataType::Union(_, _) => "union",
         DataType::Dictionary(_, _) => "map",
-        DataType::Map(_, _) => unimplemented!("Map support not implemented"),
+        DataType::Map(_, _) => "map",
         DataType::RunEndEncoded(_, _) => {
             unimplemented!("RunEndEncoded support not implemented")
         }

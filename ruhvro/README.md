@@ -42,6 +42,28 @@ fn main() {
 }
 ```
 
+### Named types in separate schema documents
+
+When a schema references named types (records, enums, fixeds) defined in
+other documents, parse them together with `parse_schema_list`. The last
+element is the top-level schema; the rest supply its dependencies in any
+order. The result is a self-contained `Schema` usable exactly like the output
+of `parse_schema`.
+
+```rust
+let side = r#"{"type": "record", "name": "Side", "namespace": "com.example",
+    "fields": [{"name": "shares", "type": "long"}, {"name": "venue", "type": "string"}]}"#;
+let position = r#"{"type": "record", "name": "Position", "namespace": "com.example",
+    "fields": [{"name": "long", "type": "Side"},
+               {"name": "short", "type": "Side"},
+               {"name": "fills", "type": {"type": "array", "items": "Side"}}]}"#;
+
+let schema = std::sync::Arc::new(
+    ruhvro::deserialize::parse_schema_list(&[side, position]).unwrap(),
+);
+let batches = ruhvro::deserialize::per_datum_deserialize_threaded(datums, schema.clone(), 8).unwrap();
+```
+
 ## Benchmarks
 
 Criterion microbenchmarks live under `benches/` and cover both the deserialize and

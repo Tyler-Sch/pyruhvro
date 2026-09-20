@@ -16,7 +16,7 @@
 //! Out of scope here (fall back): `array`, `map`, `bytes`, `fixed`, `decimal`,
 //! `uuid`, `duration`, `time-*`.
 
-use crate::schema_translate::to_arrow_schema;
+use crate::schema::to_arrow_schema;
 use anyhow::{anyhow, bail, Result};
 use apache_avro::schema::{EnumSchema, RecordSchema, UnionSchema};
 use apache_avro::Schema as AvroSchema;
@@ -171,7 +171,7 @@ struct MapDecoder {
 // ============================================================================
 
 /// Build a field decoder given the avro schema plus the arrow `Field` that
-/// `schema_translate` produced for it. Using the pre-computed arrow field
+/// `schema::translate` produced for it. Using the pre-computed arrow field
 /// avoids re-walking the schema to figure out nested-field nullability.
 fn make_decoder(schema: &AvroSchema, arrow_field: &Field, cap: usize) -> Result<FieldDecoder> {
     Ok(match schema {
@@ -377,7 +377,7 @@ fn make_union_decoder(u: &UnionSchema, arrow_field: &Field, cap: usize) -> Resul
         return make_nullable_decoder(inner_schema, arrow_field, null_first, cap);
     }
     // N-variant: produce a sparse Arrow union. Extract per-variant fields from
-    // arrow_field.data_type(), which schema_translate has already populated.
+    // arrow_field.data_type(), which schema::translate has already populated.
     let union_arrow_fields = match arrow_field.data_type() {
         DataType::Union(uf, _mode) => uf.clone(),
         other => bail!("expected Union datatype for multi-variant union, got {other:?}"),
