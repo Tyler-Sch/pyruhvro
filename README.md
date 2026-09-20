@@ -101,6 +101,93 @@ record_batches: List[RecordBatch] = deserialize_array_threaded(serialized_messag
 serialized_records =  [serialize_record_batch(r, schema, 8) for r in record_batches]
 
 ```
+
+### Named schema references
+
+Avro lets you define a named type (record, enum, or fixed) once and reuse it by
+name elsewhere in the schema. pyruhvro resolves these references up front, so
+schemas that reuse types still take the fast decode/encode path — no change to
+how you call the library.
+
+```python
+import pyarrow as pa
+from pyruhvro import deserialize_array_threaded, serialize_record_batch
+
+# `Side` is defined once (in `long`) and referenced by name in a record field,
+# a nullable union, an array, and a map.
+schema = """
+{
+  "type": "record",
+  "name": "Position",
+  "namespace": "com.example",
+  "fields": [
+    {"name": "long", "type": {
+      "type": "record", "name": "Side",
+      "fields": [
+        {"name": "shares", "type": "long"},
+        {"name": "venue",  "type": "string"}
+      ]}},
+    {"name": "short",   "type": "Side"},
+    {"name": "hedge",   "type": ["null", "Side"], "default": null},
+    {"name": "fills",   "type": {"type": "array", "items": "Side"}},
+    {"name": "by_book", "type": {"type": "map",   "values": "Side"}}
+  ]
+}
+"""
+
+record_batches = deserialize_array_threaded(serialized_messages, schema, 8)
+print(record_batches[0].schema)
+# long: struct<shares: int64 not null, venue: string not null> not null
+# short: struct<shares: int64 not null, venue: string not null> not null
+# hedge: struct<shares: int64, venue: string>
+# fills: list<item: struct<shares: int64, venue: string>> not null
+# by_book: map<string, struct<shares: int64 not null, venue: string not null>> not null
+
+serialized_records = [serialize_record_batch(r, schema, 8) for r in record_batches]
+```
+
+#### Referenced types in separate schema strings
+
+If the referenced types live in their own documents (one `.avsc` per type, or
+schema-registry references), pass a **list of schema strings** instead of one.
+The last element is the top-level schema; the others define the named types it
+refers to, in any order. The list is accepted everywhere a schema string is.
+
+```python
+side = """
+{
+  "type": "record", "name": "Side", "namespace": "com.example",
+  "fields": [
+    {"name": "shares", "type": "long"},
+    {"name": "venue",  "type": "string"}
+  ]
+}
+"""
+
+position = """
+{
+  "type": "record", "name": "Position", "namespace": "com.example",
+  "fields": [
+    {"name": "long",    "type": "Side"},
+    {"name": "short",   "type": "Side"},
+    {"name": "hedge",   "type": ["null", "Side"], "default": null},
+    {"name": "fills",   "type": {"type": "array", "items": "Side"}},
+    {"name": "by_book", "type": {"type": "map",   "values": "Side"}}
+  ]
+}
+"""
+
+schema = [side, position]   # dependencies first, top-level schema last
+record_batches = deserialize_array_threaded(serialized_messages, schema, 8)
+serialized_records = [serialize_record_batch(r, schema, 8) for r in record_batches]
+```
+
+Passing `position` on its own raises `ValueError: Unknown primitive type:
+com.example.Side`, since nothing in that string defines `Side`.
+
+Recursive schemas (a type that contains itself, e.g. a linked list `Node` with a
+`["null", "Node"]` field) have no finite Arrow representation and raise an error
+rather than being decoded.
 ## Building from source:
 requires [rust tools](https://doc.rust-lang.org/cargo/getting-started/installation.html) to be installed
 - create python virtual environment

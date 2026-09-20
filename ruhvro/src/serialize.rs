@@ -543,6 +543,42 @@ mod named_ref_tests {
     }
 
     #[test]
+    fn parse_schema_list_round_trips_like_single_document() {
+        // Same types as SCHEMA, but `S` lives in its own document and `R`
+        // refers to it by name everywhere.
+        let s_doc = r#"{"type": "record", "name": "S", "namespace": "ns",
+            "fields": [{"name": "x", "type": "string"}, {"name": "y", "type": "int"}]}"#;
+        let r_doc = r#"{"type": "record", "name": "R", "namespace": "ns", "fields": [
+            {"name": "a", "type": "S"},
+            {"name": "b", "type": "S"},
+            {"name": "c", "type": ["null", "S"]},
+            {"name": "d", "type": {"type": "array", "items": "S"}},
+            {"name": "e", "type": {"type": "map", "values": "S"}}]}"#;
+        let from_list = Arc::new(crate::deserialize::parse_schema_list(&[s_doc, r_doc]).unwrap());
+        let single = parse_schema(SCHEMA).unwrap();
+        assert_eq!(from_list.canonical_form(), single.canonical_form());
+
+        // Data written with the single-document schema reads with the list
+        // one and round-trips byte-for-byte on both fast and threaded paths.
+        let bytes = encoded_rows(&single, 6);
+        let refs: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+        let rbs = per_datum_deserialize_threaded(refs.clone(), Arc::clone(&from_list), 2).unwrap();
+        let rb = arrow::compute::concat_batches(&rbs[0].schema(), &rbs).unwrap();
+        assert_eq!(rb.num_rows(), 6);
+        let out = serialize_record_batch(rb, Arc::clone(&from_list), 2).unwrap();
+        let got: Vec<&[u8]> = out.iter().flat_map(|a| a.iter().map(|v| v.unwrap())).collect();
+        assert_eq!(got, refs);
+    }
+
+    #[test]
+    fn parse_schema_list_reports_missing_dependency() {
+        let r_doc = r#"{"type": "record", "name": "R", "fields": [{"name": "a", "type": "Missing"}]}"#;
+        let err = crate::deserialize::parse_schema_list(&[r_doc]).unwrap_err().to_string();
+        assert!(err.contains("Missing"), "{err}");
+        assert!(crate::deserialize::parse_schema_list::<&str>(&[]).is_err());
+    }
+
+    #[test]
     fn recursive_schema_is_an_error_not_a_panic() {
         let schema = parse_schema(
             r#"{"type":"record","name":"Node","fields":[

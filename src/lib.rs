@@ -32,7 +32,7 @@ fn extract_bytes_list(list: &Bound<'_, PyList>) -> PyResult<Vec<PyBackedBytes>> 
         .collect()
 }
 
-/// Schema cache, keyed by the raw schema string. Avoids reparsing on every
+/// Schema cache, keyed by the raw schema string(s). Avoids reparsing on every
 /// call — schema parsing dominates small-payload latency for repeated calls
 /// with the same schema. Unbounded by design: real workloads use a handful
 /// of distinct schemas per process.
@@ -41,25 +41,55 @@ fn schema_cache() -> &'static Mutex<HashMap<String, Arc<AvroSchema>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn get_or_parse_schema(schema: &str) -> PyResult<Arc<AvroSchema>> {
+/// The `schema` argument every entry point accepts: either one schema
+/// document, or a list of interdependent documents where the **last** is the
+/// top-level schema and the others define named types it references
+/// (see `ruhvro::deserialize::parse_schema_list`).
+#[derive(FromPyObject)]
+enum SchemaArg {
+    Single(String),
+    List(Vec<String>),
+}
+
+impl SchemaArg {
+    /// Cache key. JSON can't contain a raw NUL byte, so joining on it can't
+    /// collide with a single-document key or a differently-split list.
+    fn cache_key(&self) -> String {
+        match self {
+            SchemaArg::Single(s) => s.clone(),
+            SchemaArg::List(v) => v.join("\0"),
+        }
+    }
+
+    fn parse(&self) -> PyResult<AvroSchema> {
+        match self {
+            SchemaArg::Single(s) => deserialize::parse_schema(s),
+            SchemaArg::List(v) => deserialize::parse_schema_list(v),
+        }
+        .map_err(to_py_err)
+    }
+}
+
+fn get_or_parse_schema(schema: &SchemaArg) -> PyResult<Arc<AvroSchema>> {
+    let key = schema.cache_key();
     {
         let cache = schema_cache().lock().expect("schema cache poisoned");
-        if let Some(s) = cache.get(schema) {
+        if let Some(s) = cache.get(&key) {
             return Ok(Arc::clone(s));
         }
     }
-    let parsed = Arc::new(deserialize::parse_schema(schema).map_err(to_py_err)?);
+    let parsed = Arc::new(schema.parse()?);
     let mut cache = schema_cache().lock().expect("schema cache poisoned");
-    Ok(Arc::clone(cache.entry(schema.to_string()).or_insert(parsed)))
+    Ok(Arc::clone(cache.entry(key).or_insert(parsed)))
 }
 
 #[pyfunction]
 fn deserialize_array(
     py: Python<'_>,
     list: &Bound<'_, PyList>,
-    schema: &str,
+    schema: SchemaArg,
 ) -> PyResult<PyArrowType<RecordBatch>> {
-    let parsed_schema = get_or_parse_schema(schema)?;
+    let parsed_schema = get_or_parse_schema(&schema)?;
     let owned = extract_bytes_list(list)?;
     let record_batch = py
         .detach(move || {
@@ -74,10 +104,10 @@ fn deserialize_array(
 fn deserialize_array_threaded(
     py: Python<'_>,
     list: &Bound<'_, PyList>,
-    schema: &str,
+    schema: SchemaArg,
     num_chunks: usize,
 ) -> PyResult<Vec<PyArrowType<RecordBatch>>> {
-    let parsed_schema = get_or_parse_schema(schema)?;
+    let parsed_schema = get_or_parse_schema(&schema)?;
     let owned = extract_bytes_list(list)?;
     let record_batches = py
         .detach(move || {
@@ -92,10 +122,10 @@ fn deserialize_array_threaded(
 fn serialize_record_batch(
     py: Python<'_>,
     data: PyArrowType<RecordBatch>,
-    schema: &str,
+    schema: SchemaArg,
     num_chunks: usize,
 ) -> PyResult<Vec<PyArrowType<ArrayData>>> {
-    let parsed_schema = get_or_parse_schema(schema)?;
+    let parsed_schema = get_or_parse_schema(&schema)?;
     let serialized = py
         .detach(move || serialize::serialize_record_batch(data.0, parsed_schema, num_chunks))
         .map_err(to_py_err)?;
@@ -109,10 +139,10 @@ fn serialize_record_batch(
 fn deserialize_array_threaded_spawn(
     py: Python<'_>,
     list: &Bound<'_, PyList>,
-    schema: &str,
+    schema: SchemaArg,
     num_chunks: usize,
 ) -> PyResult<Vec<PyArrowType<RecordBatch>>> {
-    let parsed_schema = get_or_parse_schema(schema)?;
+    let parsed_schema = get_or_parse_schema(&schema)?;
     let owned = extract_bytes_list(list)?;
     let record_batches = py
         .detach(move || {
@@ -131,10 +161,10 @@ fn deserialize_array_threaded_spawn(
 fn serialize_record_batch_spawn(
     py: Python<'_>,
     data: PyArrowType<RecordBatch>,
-    schema: &str,
+    schema: SchemaArg,
     num_chunks: usize,
 ) -> PyResult<Vec<PyArrowType<ArrayData>>> {
-    let parsed_schema = get_or_parse_schema(schema)?;
+    let parsed_schema = get_or_parse_schema(&schema)?;
     let serialized = py
         .detach(move || {
             serialize::serialize_record_batch_spawn(data.0, parsed_schema, num_chunks)

@@ -1,11 +1,12 @@
 use crate::complex::StructContainer;
 use crate::fast_decode;
-use crate::schema_resolve::resolve_refs;
+use crate::schema_resolve::{embed_definitions, resolve_refs};
 use crate::schema_translate::to_arrow_schema;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use apache_avro::from_avro_datum;
+use apache_avro::schema::ResolvedSchema;
 use apache_avro::Schema as AvroSchema;
 use arrow::array::{Array, BinaryArray, RecordBatch};
 use tokio::task;
@@ -18,6 +19,26 @@ use tokio::task;
 /// Parses string into AvroSchema object
 pub fn parse_schema(schema_string: &str) -> Result<AvroSchema> {
     Ok(AvroSchema::parse_str(schema_string)?)
+}
+
+/// Parses a set of interdependent schema strings and returns the **last**
+/// one, with the named types it references from the others folded in.
+///
+/// Use this when a top-level schema refers to types (records, enums, fixeds)
+/// that live in separate documents — e.g. one `.avsc` per type, or schema
+/// registry references. Order among the dependencies doesn't matter; the
+/// final element is the schema you'll serialize / deserialize with.
+///
+/// The result is a self-contained schema equivalent to what [`parse_schema`]
+/// returns for the same types written as a single document, so it can be
+/// used anywhere a parsed schema is accepted.
+pub fn parse_schema_list<S: AsRef<str>>(schema_strings: &[S]) -> Result<AvroSchema> {
+    let parsed = AvroSchema::parse_list(schema_strings)?;
+    let Some(main) = parsed.last() else {
+        return Err(anyhow!("parse_schema_list requires at least one schema"));
+    };
+    let names = ResolvedSchema::try_from(parsed.iter().collect::<Vec<_>>())?;
+    embed_definitions(main, names.get_names())
 }
 
 /// Single threaded, takes a Vec of binary encoded schemaless avro and the parsed avro
