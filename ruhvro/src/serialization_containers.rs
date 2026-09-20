@@ -10,14 +10,21 @@ use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type, TimestampMillisecondType};
 use std::collections::HashMap;
 
-pub fn serialize(schema: &Schema, struct_arry: &ArrayRef) -> anyhow::Result<GenericBinaryArray<i32>> {
-    let mut arr_container = ArrayContainers::try_new(struct_arry, schema)?;
+/// `schema` is the original parsed schema and is what `to_avro_datum` encodes
+/// against. `resolved` is the same schema with named references inlined (see
+/// `schema_resolve`) and drives the column walk, which has no name table.
+pub fn serialize(
+    schema: &Schema,
+    resolved: &Schema,
+    struct_arry: &ArrayRef,
+) -> anyhow::Result<GenericBinaryArray<i32>> {
+    let mut arr_container = ArrayContainers::try_new(struct_arry, resolved)?;
     let mut builder = GenericBinaryBuilder::new();
-    (0..struct_arry.len()).for_each(|_| {
+    for _ in 0..struct_arry.len() {
         let val = arr_container.get_next();
-        let serialized = to_avro_datum(schema, val).unwrap();
+        let serialized = to_avro_datum(schema, val)?;
         builder.append_value(serialized);
-    });
+    }
     Ok(builder.finish())
 }
 

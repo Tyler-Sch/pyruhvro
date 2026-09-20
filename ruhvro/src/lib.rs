@@ -52,6 +52,7 @@ pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
 ///
 ///```
 pub mod deserialize;
+mod schema_resolve;
 mod schema_translate;
 mod serialization_containers;
 pub mod serialize;
