@@ -141,7 +141,7 @@ struct ListEncoder<'a> {
 struct MapEncoder<'a> {
     array: &'a MapArray,
     /// Keys are always strings in Avro (and in the Arrow representation
-    /// produced by schema_translate).
+    /// produced by schema::translate).
     keys: &'a StringArray,
     values: FieldEncoder<'a>,
 }
@@ -272,7 +272,7 @@ fn build_union_encoder<'a>(
     let variants = u.variants();
     let mut children = Vec::with_capacity(variants.len());
     for (i, variant) in variants.iter().enumerate() {
-        // schema_translate emits type_ids 0..N in order; we rely on that here.
+        // schema::translate emits type_ids 0..N in order; we rely on that here.
         let child_arr = ua.child(i as i8);
         children.push(build_field_encoder(variant, child_arr)?);
     }

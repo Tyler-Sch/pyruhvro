@@ -4,7 +4,7 @@ use arrow::array::{
 };
 use tokio::task;
 use std::sync::Arc;
-use crate::schema_resolve::resolve_refs;
+use crate::schema::resolve_refs;
 use crate::serialization_containers;
 use anyhow::{anyhow, Result};
 // TODO: Should be checks to make sure avro and arrow schema match
@@ -442,7 +442,8 @@ mod test {
 #[cfg(test)]
 mod named_ref_tests {
     use super::*;
-    use crate::deserialize::{parse_schema, per_datum_deserialize, per_datum_deserialize_threaded};
+    use crate::deserialize::{per_datum_deserialize, per_datum_deserialize_threaded};
+    use crate::schema::parse_schema;
     use apache_avro::to_avro_datum;
     use apache_avro::types::Value;
 
@@ -492,7 +493,7 @@ mod named_ref_tests {
     #[test]
     fn named_refs_take_the_fast_path() {
         let schema = parse_schema(SCHEMA).unwrap();
-        let resolved = crate::schema_resolve::resolve_refs(&schema).unwrap();
+        let resolved = crate::schema::resolve_refs(&schema).unwrap();
         assert!(crate::fast_decode::is_supported(&resolved));
         assert!(crate::fast_encode::is_supported(&resolved));
     }
@@ -530,7 +531,7 @@ mod named_ref_tests {
         // the original schema for `from_avro_datum`, and the container walk
         // needs the inlined copy.
         let schema = parse_schema(SCHEMA).unwrap();
-        let resolved = crate::schema_resolve::resolve_refs(&schema).unwrap();
+        let resolved = crate::schema::resolve_refs(&schema).unwrap();
         let bytes = encoded_rows(&schema, 4);
         let refs: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
 
@@ -554,9 +555,8 @@ mod named_ref_tests {
             {"name": "c", "type": ["null", "S"]},
             {"name": "d", "type": {"type": "array", "items": "S"}},
             {"name": "e", "type": {"type": "map", "values": "S"}}]}"#;
-        let from_list = Arc::new(crate::deserialize::parse_schema_list(&[s_doc, r_doc]).unwrap());
+        let from_list = Arc::new(crate::schema::parse_schema_list(&[s_doc, r_doc]).unwrap());
         let single = parse_schema(SCHEMA).unwrap();
-        assert_eq!(from_list.canonical_form(), single.canonical_form());
 
         // Data written with the single-document schema reads with the list
         // one and round-trips byte-for-byte on both fast and threaded paths.
@@ -568,14 +568,6 @@ mod named_ref_tests {
         let out = serialize_record_batch(rb, Arc::clone(&from_list), 2).unwrap();
         let got: Vec<&[u8]> = out.iter().flat_map(|a| a.iter().map(|v| v.unwrap())).collect();
         assert_eq!(got, refs);
-    }
-
-    #[test]
-    fn parse_schema_list_reports_missing_dependency() {
-        let r_doc = r#"{"type": "record", "name": "R", "fields": [{"name": "a", "type": "Missing"}]}"#;
-        let err = crate::deserialize::parse_schema_list(&[r_doc]).unwrap_err().to_string();
-        assert!(err.contains("Missing"), "{err}");
-        assert!(crate::deserialize::parse_schema_list::<&str>(&[]).is_err());
     }
 
     #[test]

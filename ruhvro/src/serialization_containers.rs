@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 /// `schema` is the original parsed schema and is what `to_avro_datum` encodes
 /// against. `resolved` is the same schema with named references inlined (see
-/// `schema_resolve`) and drives the column walk, which has no name table.
+/// `schema::resolve`) and drives the column walk, which has no name table.
 pub fn serialize(
     schema: &Schema,
     resolved: &Schema,

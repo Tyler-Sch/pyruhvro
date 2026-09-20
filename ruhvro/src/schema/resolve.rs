@@ -34,7 +34,7 @@ use std::collections::HashSet;
 /// Errors if a reference cannot be resolved or if the schema is recursive
 /// (a type that, directly or indirectly, contains itself). Recursive types
 /// have no finite Arrow representation, so this matches the error
-/// `schema_translate::to_arrow_schema` produces for the same input.
+/// `super::translate::to_arrow_schema` produces for the same input.
 pub fn resolve_refs(schema: &Schema) -> Result<Cow<'_, Schema>> {
     if !contains_ref(schema) {
         return Ok(Cow::Borrowed(schema));

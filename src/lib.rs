@@ -15,12 +15,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use apache_avro::Schema as AvroSchema;
 use arrow::array::{Array, ArrayData, RecordBatch};
+use arrow::datatypes::Schema as ArrowSchema;
 use arrow::pyarrow::PyArrowType;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyList;
-use ruhvro::{deserialize, serialize};
+use ruhvro::{deserialize, schema, serialize};
 
 fn to_py_err<E: std::fmt::Display>(e: E) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -44,7 +45,7 @@ fn schema_cache() -> &'static Mutex<HashMap<String, Arc<AvroSchema>>> {
 /// The `schema` argument every entry point accepts: either one schema
 /// document, or a list of interdependent documents where the **last** is the
 /// top-level schema and the others define named types it references
-/// (see `ruhvro::deserialize::parse_schema_list`).
+/// (see `ruhvro::schema::parse_schema_list`).
 #[derive(FromPyObject)]
 enum SchemaArg {
     Single(String),
@@ -63,8 +64,8 @@ impl SchemaArg {
 
     fn parse(&self) -> PyResult<AvroSchema> {
         match self {
-            SchemaArg::Single(s) => deserialize::parse_schema(s),
-            SchemaArg::List(v) => deserialize::parse_schema_list(v),
+            SchemaArg::Single(s) => schema::parse_schema(s),
+            SchemaArg::List(v) => schema::parse_schema_list(v),
         }
         .map_err(to_py_err)
     }
@@ -81,6 +82,16 @@ fn get_or_parse_schema(schema: &SchemaArg) -> PyResult<Arc<AvroSchema>> {
     let parsed = Arc::new(schema.parse()?);
     let mut cache = schema_cache().lock().expect("schema cache poisoned");
     Ok(Arc::clone(cache.entry(key).or_insert(parsed)))
+}
+
+/// Translate an Avro schema into the `pyarrow.Schema` that `deserialize_array`
+/// would produce for it. Uses the same schema cache and accepts the same
+/// single-document-or-list form as the other entry points.
+#[pyfunction]
+fn avro_to_arrow_schema(schema: SchemaArg) -> PyResult<PyArrowType<ArrowSchema>> {
+    let parsed_schema = get_or_parse_schema(&schema)?;
+    let arrow_schema = ruhvro::schema::to_arrow_schema(&parsed_schema).map_err(to_py_err)?;
+    Ok(PyArrowType(arrow_schema))
 }
 
 #[pyfunction]
@@ -184,5 +195,6 @@ fn pyruhvro(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serialize_record_batch, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize_array_threaded_spawn, m)?)?;
     m.add_function(wrap_pyfunction!(serialize_record_batch_spawn, m)?)?;
+    m.add_function(wrap_pyfunction!(avro_to_arrow_schema, m)?)?;
     Ok(())
 }
